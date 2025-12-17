@@ -12,6 +12,7 @@ from typing import List, Optional
 
 try:
     import undetected_chromedriver as uc
+
     UNDETECTED_AVAILABLE = True
 except ImportError:
     UNDETECTED_AVAILABLE = False
@@ -24,7 +25,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("crasher_bot.log", encoding='utf-8'), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler("crasher_bot.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -120,11 +124,11 @@ class CrasherBot:
         try:
             logger.info(message)
         except UnicodeEncodeError:
-            clean_msg = message.encode('ascii', 'ignore').decode('ascii')
+            clean_msg = message.encode("ascii", "ignore").decode("ascii")
             logger.info(clean_msg)
 
     def init_driver(self) -> bool:
-        """Initialize undetected Chrome driver - MACBOOK CONFIG"""
+        """Initialize undetected Chrome driver"""
         try:
             if not UNDETECTED_AVAILABLE:
                 self.log("ERROR: undetected-chromedriver not installed!")
@@ -142,6 +146,7 @@ class CrasherBot:
             )
             self.driver.set_page_load_timeout(60)
             self.driver.implicitly_wait(10)
+            self.driver.set_script_timeout(15)  # Set default script timeout
             self.wait = WebDriverWait(self.driver, 30)
 
             self.log("OK Driver initialized")
@@ -228,7 +233,7 @@ class CrasherBot:
             self.log("Finding game iframe (looking for one with src)...")
             game_iframe = None
             game_iframe_index = -1
-            
+
             for i, iframe in enumerate(iframes):
                 iframe_src = iframe.get_attribute("src")
                 if iframe_src and len(iframe_src) > 50:  # Game iframe has long URL
@@ -237,7 +242,7 @@ class CrasherBot:
                     self.log(f"Found game iframe at index {i}")
                     self.log(f"Game iframe src: {iframe_src[:80]}...")
                     break
-            
+
             if not game_iframe:
                 self.log("ERROR: Could not find game iframe with src!")
                 return False
@@ -276,6 +281,7 @@ class CrasherBot:
         except Exception as e:
             self.log(f"Failed to load game: {e}")
             import traceback
+
             self.log(traceback.format_exc())
             return False
 
@@ -388,142 +394,196 @@ class CrasherBot:
         except Exception as e:
             pass
 
-    def setup_auto_cashout(self) -> bool:
-        """Setup auto cashout configuration"""
-        try:
-            self.log(f"Setting up auto cashout at {self.auto_cashout}x...")
+    def setup_auto_cashout(self, max_retries: int = 3) -> bool:
+        """Setup auto cashout configuration with retries"""
+        for retry_attempt in range(max_retries):
+            try:
+                if retry_attempt > 0:
+                    self.log(
+                        f"Retrying auto cashout setup (attempt {retry_attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(3)
 
-            self.log("Looking for AUTO button in first panel...")
+                self.driver.set_script_timeout(10)  # 10 second timeout per script
 
-            max_attempts = 10
-            auto_button_clicked = False
+                self.log(f"Setting up auto cashout at {self.auto_cashout}x...")
+                self.log("Looking for AUTO button in first panel...")
 
-            for attempt in range(max_attempts):
-                script = """
-                var panels = document.querySelectorAll('div[data-singlebetpart]');
-                if (panels.length === 0) return {found: false};
-                var firstPanel = panels[0];
-                var buttons = firstPanel.querySelectorAll('button');
-                for (var i = 0; i < buttons.length; i++) {
-                    var btn = buttons[i];
-                    if (btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
-                        return {found: true, text: btn.textContent};
-                    }
-                }
-                return {found: false};
-                """
+                max_attempts = 15
+                auto_button_clicked = False
 
-                result = self.driver.execute_script(script)
+                for attempt in range(max_attempts):
+                    try:
+                        script = """
+                        try {
+                            var panels = document.querySelectorAll('div[data-singlebetpart]');
+                            if (!panels || panels.length === 0) return {found: false, error: 'no panels'};
+                            var firstPanel = panels[0];
+                            if (!firstPanel) return {found: false, error: 'no first panel'};
+                            var buttons = firstPanel.querySelectorAll('button');
+                            if (!buttons) return {found: false, error: 'no buttons'};
+                            for (var i = 0; i < buttons.length; i++) {
+                                var btn = buttons[i];
+                                if (btn && btn.textContent && btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
+                                    return {found: true, text: btn.textContent};
+                                }
+                            }
+                            return {found: false, error: 'auto button not visible'};
+                        } catch(e) {
+                            return {found: false, error: e.toString()};
+                        }
+                        """
 
-                if result.get("found"):
-                    click_script = """
+                        result = self.driver.execute_script(script)
+
+                        if result.get("found"):
+                            click_script = """
+                            try {
+                                var panels = document.querySelectorAll('div[data-singlebetpart]');
+                                var firstPanel = panels[0];
+                                var buttons = firstPanel.querySelectorAll('button');
+                                for (var i = 0; i < buttons.length; i++) {
+                                    var btn = buttons[i];
+                                    if (btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
+                                        btn.click();
+                                        return {clicked: true};
+                                    }
+                                }
+                                return {clicked: false};
+                            } catch(e) {
+                                return {clicked: false, error: e.toString()};
+                            }
+                            """
+
+                            clicked_result = self.driver.execute_script(click_script)
+
+                            if clicked_result.get("clicked"):
+                                self.log("OK AUTO button clicked (first panel)")
+                                auto_button_clicked = True
+                                time.sleep(1)
+                                break
+
+                        time.sleep(1)
+
+                    except TimeoutException:
+                        self.log(
+                            f"Script timeout on attempt {attempt + 1}, retrying..."
+                        )
+                        time.sleep(1)
+                        continue
+
+                if not auto_button_clicked:
+                    raise Exception("AUTO button not found after waiting")
+
+                self.log("Enabling Auto Cashout toggle in first panel...")
+
+                toggle_script = """
+                try {
                     var panels = document.querySelectorAll('div[data-singlebetpart]');
                     var firstPanel = panels[0];
-                    var buttons = firstPanel.querySelectorAll('button');
-                    for (var i = 0; i < buttons.length; i++) {
-                        var btn = buttons[i];
-                        if (btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
-                            btn.click();
-                            return true;
+                    var toggle = firstPanel.querySelector('input[data-testid="aut-co-tgl"]');
+                    if (toggle) {
+                        if (!toggle.checked) {
+                            toggle.click();
                         }
+                        return {found: true, enabled: toggle.checked};
                     }
-                    return false;
-                    """
+                    return {found: false};
+                } catch(e) {
+                    return {found: false, error: e.toString()};
+                }
+                """
 
-                    clicked = self.driver.execute_script(click_script)
+                result = self.driver.execute_script(toggle_script)
 
-                    if clicked:
-                        self.log("OK AUTO button clicked (first panel)")
-                        auto_button_clicked = True
-                        time.sleep(1)
-                        break
+                if not result.get("found"):
+                    raise Exception("Auto Cashout toggle not found in first panel")
 
-                if attempt % 2 == 0:
-                    self.log(
-                        f"Waiting for AUTO button... (attempt {attempt + 1}/{max_attempts})"
+                self.log("OK Auto Cashout toggle enabled")
+                time.sleep(1.5)
+
+                self.log(f"Setting auto cashout value to {self.auto_cashout}x...")
+
+                # Use Selenium native methods with shorter timeout for input
+                try:
+                    from selenium.webdriver.common.keys import Keys
+
+                    panels = self.driver.find_elements(
+                        By.CSS_SELECTOR, "div[data-singlebetpart]"
                     )
+                    if not panels:
+                        raise Exception("No betting panels found")
+
+                    first_panel = panels[0]
+
+                    # Wait for input to be present and clickable
+                    auto_input = WebDriverWait(first_panel, 5).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]')
+                        )
+                    )
+
+                    # Clear and set value
+                    auto_input.click()
+                    time.sleep(0.3)
+
+                    # Clear existing value
+                    for _i in range(0, 4):
+                        auto_input.send_keys(Keys.BACKSPACE)
+                    time.sleep(0.2)
+
+                    # Enter new value
+                    auto_input.send_keys(str(self.auto_cashout))
+                    time.sleep(0.5)
+
+                    # Verify the value was set
+                    final_value = auto_input.get_attribute("value")
+                    self.log(f"OK Auto cashout set to {final_value}x")
+
+                    if float(final_value) != self.auto_cashout:
+                        self.log(
+                            f"WARNING: Expected {self.auto_cashout}, got {final_value}"
+                        )
+                        # Try one more time
+                        auto_input.click()
+                        time.sleep(0.2)
+                        for _i in range(0, 4):
+                            auto_input.send_keys(Keys.BACKSPACE)
+                        time.sleep(0.2)
+                        auto_input.send_keys(str(self.auto_cashout))
+                        time.sleep(0.5)
+                        final_value = auto_input.get_attribute("value")
+                        self.log(f"Retry: Auto cashout now set to {final_value}x")
+
+                except TimeoutException:
+                    raise Exception("Timeout waiting for auto cashout input field")
+                except Exception as e:
+                    raise Exception(f"Failed to set auto cashout value: {e}")
+
                 time.sleep(1)
 
-            if not auto_button_clicked:
-                self.log("WARNING: AUTO button not found after waiting")
-                return False
+                self.auto_cashout_configured = True
+                self.rounds_since_setup = 0
+                self.log("OK Auto cashout configuration complete!")
 
-            self.log("Enabling Auto Cashout toggle in first panel...")
+                return True
 
-            script = """
-            var panels = document.querySelectorAll('div[data-singlebetpart]');
-            var firstPanel = panels[0];
-            var toggle = firstPanel.querySelector('input[data-testid="aut-co-tgl"]');
-            if (toggle) {
-                if (!toggle.checked) {
-                    toggle.click();
-                }
-                return {found: true, enabled: toggle.checked};
-            }
-            return {found: false};
-            """
-
-            result = self.driver.execute_script(script)
-
-            if not result.get("found"):
-                self.log("WARNING: Auto Cashout toggle not found in first panel!")
-                return False
-
-            self.log("OK Auto Cashout toggle enabled")
-            time.sleep(1.5)
-
-            self.log(f"Setting auto cashout value to {self.auto_cashout}x...")
-
-            try:
-                from selenium.webdriver.common.keys import Keys
-
-                panels = self.driver.find_elements(
-                    By.CSS_SELECTOR, "div[data-singlebetpart]"
-                )
-                if not panels:
-                    self.log("WARNING: No betting panels found!")
+            except TimeoutException as e:
+                self.log(f"Setup timeout on attempt {retry_attempt + 1}: {e}")
+                if retry_attempt == max_retries - 1:
                     return False
-
-                first_panel = panels[0]
-                auto_input = first_panel.find_element(
-                    By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]'
-                )
-
-                auto_input.click()
-                time.sleep(0.2)
-
-                for _i in range(0, 4):
-                    auto_input.send_keys(Keys.BACKSPACE)
-                time.sleep(0.2)
-
-                auto_input.send_keys(str(self.auto_cashout))
-                time.sleep(0.3)
-
-                final_value = auto_input.get_attribute("value")
-                self.log(f"OK Auto cashout set to {final_value}x")
-
-                if float(final_value) != self.auto_cashout:
-                    self.log(
-                        f"WARNING: Expected {self.auto_cashout}, got {final_value}"
-                    )
+                continue
 
             except Exception as e:
-                self.log(f"WARNING: Failed to set auto cashout: {e}")
-                return False
+                self.log(f"Setup failed on attempt {retry_attempt + 1}: {e}")
+                if retry_attempt == max_retries - 1:
+                    import traceback
 
-            time.sleep(1)
+                    self.log(traceback.format_exc())
+                    return False
+                continue
 
-            self.auto_cashout_configured = True
-            self.rounds_since_setup = 0
-            self.log("OK Auto cashout configuration complete!")
-
-            return True
-
-        except Exception as e:
-            self.log(f"Setup auto cashout failed: {e}")
-            import traceback
-            self.log(traceback.format_exc())
-            return False
+        return False
 
     def get_bettor_count(self) -> Optional[int]:
         """Get number of bettors"""
@@ -602,6 +662,7 @@ class CrasherBot:
             text = result.get("text", "")
             if "x" in text.lower():
                 import re
+
                 match = re.search(r"(\d+\.?\d*)x", text, re.IGNORECASE)
                 if match:
                     mult_str = match.group(1)
@@ -643,13 +704,16 @@ class CrasherBot:
 
             first_panel = panels[0]
 
-            bet_input = first_panel.find_element(
-                By.CSS_SELECTOR, 'input[data-testid="bp-inp"]'
+            bet_input = WebDriverWait(first_panel, 5).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, 'input[data-testid="bp-inp"]')
+                )
             )
 
             bet_input.click()
             time.sleep(0.2)
 
+            # Clear existing value
             for _i in range(0, 8):
                 bet_input.send_keys(Keys.BACKSPACE)
             time.sleep(0.2)
@@ -665,6 +729,7 @@ class CrasherBot:
         except Exception as e:
             self.log(f"Failed to enter bet amount: {e}")
             import traceback
+
             self.log(traceback.format_exc())
             return False
 
@@ -693,6 +758,7 @@ class CrasherBot:
         except Exception as e:
             self.log(f"Failed to click bet button: {e}")
             import traceback
+
             self.log(traceback.format_exc())
             return False
 
@@ -771,8 +837,20 @@ class CrasherBot:
             if not self.navigate_to_game():
                 return
 
-            if not self.setup_auto_cashout():
-                self.log("WARNING: Failed to setup auto cashout, but continuing...")
+            # Try setup with retries
+            setup_success = False
+            for i in range(3):
+                if self.setup_auto_cashout():
+                    setup_success = True
+                    break
+                self.log(f"Setup attempt {i + 1} failed, retrying in 5 seconds...")
+                time.sleep(5)
+
+            if not setup_success:
+                self.log("WARNING: Could not setup auto cashout after 3 attempts")
+                self.log(
+                    "Bot will continue monitoring, but betting may not work properly"
+                )
 
             self.log("=" * 60)
             self.log("CONFIGURATION:")
@@ -841,6 +919,9 @@ class CrasherBot:
             self.log("\nBot stopped by user")
         except Exception as e:
             self.log(f"ERROR: {e}")
+            import traceback
+
+            self.log(traceback.format_exc())
         finally:
             self.running = False
             self.log("=" * 60)
@@ -875,4 +956,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
