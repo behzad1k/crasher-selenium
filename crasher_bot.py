@@ -429,10 +429,9 @@ class CrasherBot:
                             for (var i = 0; i < buttons.length; i++) {
                                 var btn = buttons[i];
                                 if (btn && btn.textContent && btn.offsetParent !== null) {
-                                    if(btn.textContent.trim() == 'AUTO'){
+                                    if (btn.textContent.trim() == 'AUTO'){
                                         return {found: true, text: btn.textContent.trim()};
-                                    }
-                                    else if (btn.textContent.trim() === 'STOP'){
+                                    } else {
                                         return {found: true, text: btn.textContent.trim()};
                                     }
                                 }
@@ -444,7 +443,6 @@ class CrasherBot:
                         """
 
                         result = self.driver.execute_script(script)
-
                         if result.get("found"):
                             click_script = """
                             try {
@@ -453,7 +451,7 @@ class CrasherBot:
                                 var buttons = firstPanel.querySelectorAll('button');
                                 for (var i = 0; i < buttons.length; i++) {
                                     var btn = buttons[i];
-                                    if (btn.textContent.trim() === 'AUTO' && btn.offsetParent !== null) {
+                                    if (btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
                                         btn.click();
                                         return {clicked: true};
                                     }
@@ -468,7 +466,7 @@ class CrasherBot:
 
                             if (
                                 clicked_result.get("clicked")
-                                or result.get("text") == "STOP"
+                                or result.get("text") == "Stop"
                             ):
                                 self.log("OK AUTO button clicked (first panel)")
                                 auto_button_clicked = True
@@ -890,7 +888,7 @@ class CrasherBot:
 
                     self.rounds_since_setup += 1
 
-                    if self.rounds_since_setup >= 2:
+                    if self.rounds_since_setup >= 20:
                         self.log(
                             "Re-setting up auto-cashout (keeping session active)..."
                         )
