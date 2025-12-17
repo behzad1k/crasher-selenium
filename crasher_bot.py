@@ -890,7 +890,7 @@ class CrasherBot:
 
                     self.rounds_since_setup += 1
 
-                    if self.rounds_since_setup >= 20:
+                    if self.rounds_since_setup >= 2:
                         self.log(
                             "Re-setting up auto-cashout (keeping session active)..."
                         )
