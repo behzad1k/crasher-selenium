@@ -429,10 +429,10 @@ class CrasherBot:
                             for (var i = 0; i < buttons.length; i++) {
                                 var btn = buttons[i];
                                 if (btn && btn.textContent && btn.offsetParent !== null) {
-                                    if(btn.textContent.trim() === 'Auto'){
+                                    if(btn.textContent.trim() == 'AUTO'){
                                         return {found: true, text: btn.textContent.trim()};
                                     }
-                                    else if (btn.textContent.trim() === 'Stop'){
+                                    else if (btn.textContent.trim() === 'STOP'){
                                         return {found: true, text: btn.textContent.trim()};
                                     }
                                 }
@@ -453,7 +453,7 @@ class CrasherBot:
                                 var buttons = firstPanel.querySelectorAll('button');
                                 for (var i = 0; i < buttons.length; i++) {
                                     var btn = buttons[i];
-                                    if (btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
+                                    if (btn.textContent.trim() === 'AUTO' && btn.offsetParent !== null) {
                                         btn.click();
                                         return {clicked: true};
                                     }
@@ -468,7 +468,7 @@ class CrasherBot:
 
                             if (
                                 clicked_result.get("clicked")
-                                or result.get("text") == "Stop"
+                                or result.get("text") == "STOP"
                             ):
                                 self.log("OK AUTO button clicked (first panel)")
                                 auto_button_clicked = True
