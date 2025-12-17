@@ -121,34 +121,47 @@ class CrasherBot:
         self.rounds_since_setup = 0  # Track rounds since last auto-cashout setup
 
     def log(self, message: str):
-        logger.info(message)
+        # Remove emojis and special characters for Windows compatibility
+        clean_message = message.encode("ascii", "ignore").decode("ascii")
+        logger.info(clean_message)
 
     def init_driver(self) -> bool:
-        """Initialize undetected Chrome driver"""
+        """Initialize undetected Chrome driver - MATCHES WORKING MACBOOK CONFIG"""
         try:
             if not UNDETECTED_AVAILABLE:
                 self.log("ERROR: undetected-chromedriver not installed!")
                 self.log("Install with: pip install undetected-chromedriver")
                 return False
 
-            self.log("Initializing Chrome driver...")
+            self.log("Initializing Chrome driver (MacBook config for server)...")
             options = uc.ChromeOptions()
+
+            # Exact same options as MacBook
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--enable-webgl")
 
+            # NO --headless (using Xvfb instead)
+            # NO --use-gl=swiftshader (this was breaking the game!)
+            # NO other options that might interfere
+
             self.driver = uc.Chrome(
                 options=options, version_main=None, use_subprocess=True
             )
+
             self.driver.set_page_load_timeout(60)
             self.driver.implicitly_wait(10)
             self.wait = WebDriverWait(self.driver, 30)
 
-            self.log("✓ Driver initialized")
+            self.log("✓ Driver initialized (non-headless, using Xvfb)")
             return True
+
         except Exception as e:
             self.log(f"Failed to initialize driver: {e}")
+            import traceback
+
+            self.log(traceback.format_exc())
             return False
 
     def login(self) -> bool:
@@ -158,10 +171,36 @@ class CrasherBot:
             self.driver.get("https://1000bet.in")
             time.sleep(5)
 
-            # Check for Cloudflare
-            if "cloudflare" in self.driver.page_source.lower():
-                self.log("⚠️  Cloudflare detected - waiting...")
-                time.sleep(10)
+            # Check for Cloudflare and wait for it to resolve
+            cloudflare_wait = 0
+            max_cloudflare_wait = 90  # Wait up to 90 seconds for Cloudflare
+
+            while cloudflare_wait < max_cloudflare_wait:
+                page_source = self.driver.page_source.lower()
+
+                # Check if Cloudflare challenge is present
+                if any(
+                    keyword in page_source
+                    for keyword in [
+                        "cloudflare",
+                        "checking your browser",
+                        "ddos-guard",
+                        "challenge-platform",
+                    ]
+                ):
+                    self.log(
+                        f"⚠️  Cloudflare detected - waiting... ({cloudflare_wait}s / {max_cloudflare_wait}s)"
+                    )
+                    time.sleep(5)
+                    cloudflare_wait += 5
+                    continue
+
+                # If no Cloudflare keywords found, we're good
+                self.log("✓ Cloudflare check passed (or not present)")
+                break
+
+            if cloudflare_wait >= max_cloudflare_wait:
+                self.log("⚠️  Cloudflare bypass timeout - continuing anyway...")
 
             # Click login button
             self.log("Clicking login button...")
@@ -229,6 +268,12 @@ class CrasherBot:
 
             if len(iframes) == 0:
                 self.log("ERROR: No iframes found!")
+                # Save screenshot for debugging
+                try:
+                    self.driver.save_screenshot("/tmp/no_iframe_error.png")
+                    self.log("Screenshot saved to /tmp/no_iframe_error.png")
+                except:
+                    pass
                 return False
 
             # Switch to the first iframe
@@ -244,7 +289,9 @@ class CrasherBot:
             except:
                 pass
 
-            time.sleep(3)
+            # Wait longer for first iframe content to load
+            self.log("Waiting for first iframe content to load...")
+            time.sleep(5)
 
             # Check for NESTED iframes inside the game iframe
             self.log("Checking for nested iframes inside game iframe...")
@@ -262,77 +309,139 @@ class CrasherBot:
 
                 self.driver.switch_to.frame(nested_iframes[0])
                 self.log("✓ Switched to nested iframe")
-                time.sleep(3)
+
+                # IMPORTANT: Wait much longer after switching to nested iframe
+                # This is where the actual game loads and it takes time
+                self.log(
+                    "Waiting for nested iframe game to initialize (this may take 30-60 seconds)..."
+                )
+                time.sleep(10)
             else:
                 self.log("No nested iframes found, staying in first iframe")
 
             # Wait for dynamic content to load
-            self.log("Waiting for dynamic content to populate...")
-            self.wait_for_dynamic_content()
+            self.log("Waiting for game UI elements to appear...")
+            content_loaded = self.wait_for_dynamic_content(
+                max_wait=90
+            )  # Increased to 90 seconds
+
+            if not content_loaded:
+                self.log("⚠️  Game UI elements did not appear within timeout")
+                # Debug: Check what's in the page
+                self.debug_page_content()
+                # Continue anyway - game might still work
+            else:
+                self.log("✓ Game UI elements loaded successfully!")
 
             # Close tutorial popup if present
             self.close_tutorial_popup()
 
-            self.log("✓ Game loaded successfully!")
-            return True
+            # Verify game elements are present
+            self.log("Performing final verification...")
+            if self.verify_game_loaded():
+                self.log("✓ Game loaded and verified successfully!")
+                return True
+            else:
+                self.log("⚠️  Game verification failed - but continuing...")
+                self.log(
+                    "   The game might still be loading. Setup will wait for elements."
+                )
+                return True  # Continue anyway, setup_auto_cashout will wait
 
         except Exception as e:
             self.log(f"Failed to load game: {e}")
             import traceback
 
             self.log(traceback.format_exc())
+
+            # Save debug screenshot
+            try:
+                self.driver.save_screenshot("/tmp/game_load_error.png")
+                self.log("Error screenshot saved to /tmp/game_load_error.png")
+            except:
+                pass
+
             return False
 
-    def wait_for_dynamic_content(self, max_wait: int = 40):
+    def wait_for_dynamic_content(self, max_wait: int = 60):
         """Wait for the game's dynamic content to populate the DOM with VISIBLE elements"""
         try:
+            self.log(f"Waiting for game elements to appear (up to {max_wait}s)...")
             start_time = time.time()
-            last_visible_count = 0
-            stable_count = 0
-
-            script = """
-            var buttons = document.querySelectorAll('button');
-            var visibleButtons = [];
-
-            for (var i = 0; i < buttons.length; i++) {
-                var btn = buttons[i];
-                var isVisible = btn.offsetParent !== null &&
-                               window.getComputedStyle(btn).display !== 'none' &&
-                               window.getComputedStyle(btn).visibility !== 'hidden';
-
-                if (isVisible) {
-                    visibleButtons.push({
-                        text: btn.textContent.trim(),
-                        className: btn.className
-                    });
-                }
-            }
-
-            return visibleButtons;
-            """
+            last_count = 0
+            stable_iterations = 0
 
             while time.time() - start_time < max_wait:
                 try:
-                    visible_buttons = self.driver.execute_script(script)
-                    current_visible = len(visible_buttons)
+                    # Check for actual game elements
+                    script = """
+                    // Check for various game elements
+                    var buttons = document.querySelectorAll('button');
+                    var visibleButtons = 0;
+                    for (var i = 0; i < buttons.length; i++) {
+                        if (buttons[i].offsetParent !== null) visibleButtons++;
+                    }
 
-                    if current_visible > last_visible_count:
-                        last_visible_count = current_visible
-                        stable_count = 0
-                    elif current_visible == last_visible_count and current_visible > 3:
-                        stable_count += 1
-                        if stable_count >= 3:
-                            time.sleep(2)
-                            return True
+                    var canvases = document.querySelectorAll('canvas').length;
+                    var bettingPanels = document.querySelectorAll('div[data-singlebetpart]').length;
+                    var inputs = document.querySelectorAll('input').length;
+
+                    return {
+                        buttons: visibleButtons,
+                        canvases: canvases,
+                        bettingPanels: bettingPanels,
+                        inputs: inputs,
+                        total: visibleButtons + canvases + bettingPanels + inputs
+                    };
+                    """
+
+                    elements = self.driver.execute_script(script)
+                    current_count = elements["total"]
+                    elapsed = int(time.time() - start_time)
+
+                    # Log progress every 5 seconds
+                    if elapsed % 5 == 0 and elapsed > 0:
+                        self.log(
+                            f"  [{elapsed}s] Buttons: {elements['buttons']}, Canvas: {elements['canvases']}, Panels: {elements['bettingPanels']}"
+                        )
+
+                    # Check if we have enough game elements
+                    if elements["bettingPanels"] > 0 or (
+                        elements["buttons"] > 5 and elements["canvases"] > 0
+                    ):
+                        self.log(f"✓ Game elements found after {elapsed}s")
+                        self.log(
+                            f"  Buttons: {elements['buttons']}, Canvas: {elements['canvases']}, Panels: {elements['bettingPanels']}"
+                        )
+                        time.sleep(2)  # Small extra wait for stability
+                        return True
+
+                    # Check if count is stable (finished loading but maybe no game yet)
+                    if current_count == last_count and current_count > 0:
+                        stable_iterations += 1
+                        if stable_iterations >= 5:  # 5 seconds of no changes
+                            self.log(
+                                f"⚠️  Content stable but no game elements detected after {elapsed}s"
+                            )
+                            self.log(
+                                f"  Found: Buttons: {elements['buttons']}, Canvas: {elements['canvases']}"
+                            )
+                            return False
+                    else:
+                        stable_iterations = 0
+                        last_count = current_count
 
                     time.sleep(1)
 
                 except Exception as e:
                     time.sleep(1)
 
+            # Timeout
+            self.log(f"⚠️  Timed out after {max_wait}s waiting for game elements")
             return False
 
         except Exception as e:
+            self.log(f"Error in wait_for_dynamic_content: {e}")
             return False
 
     def close_tutorial_popup(self):
@@ -413,6 +522,89 @@ class CrasherBot:
         except Exception as e:
             pass
 
+    def debug_page_content(self):
+        """Debug what's on the page"""
+        try:
+            self.log("=== DEBUG: Page Content ===")
+
+            # Check for canvas elements (game usually uses canvas)
+            canvases = self.driver.find_elements(By.TAG_NAME, "canvas")
+            self.log(f"Canvas elements: {len(canvases)}")
+
+            # Check for buttons
+            buttons = self.driver.find_elements(By.TAG_NAME, "button")
+            self.log(f"Button elements: {len(buttons)}")
+            if len(buttons) > 0:
+                button_texts = [btn.text[:30] for btn in buttons[:5] if btn.text]
+                self.log(f"First buttons: {button_texts}")
+
+            # Check page title
+            self.log(f"Page title: {self.driver.title}")
+
+            # Check if there are any divs with data-singlebetpart (betting panel)
+            betting_panels = self.driver.find_elements(
+                By.CSS_SELECTOR, "div[data-singlebetpart]"
+            )
+            self.log(f"Betting panels found: {len(betting_panels)}")
+
+            # Check for multiplier display
+            mult_elements = self.driver.find_elements(By.CSS_SELECTOR, "span.ZmRXV")
+            self.log(f"Multiplier elements found: {len(mult_elements)}")
+
+            # Execute JavaScript to check WebGL
+            webgl_info = self.driver.execute_script("""
+                var canvas = document.createElement('canvas');
+                var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (gl) {
+                    return {
+                        available: true,
+                        renderer: gl.getParameter(gl.RENDERER),
+                        vendor: gl.getParameter(gl.VENDOR)
+                    };
+                }
+                return {available: false};
+            """)
+            self.log(f"WebGL info: {webgl_info}")
+
+            # Check for any error messages on page
+            error_check = self.driver.execute_script("""
+                var bodyText = document.body.innerText.toLowerCase();
+                if (bodyText.includes('error')) return 'ERROR found on page';
+                if (bodyText.includes('failed')) return 'FAILED found on page';
+                if (bodyText.includes('loading')) return 'LOADING found on page';
+                return 'No errors detected';
+            """)
+            self.log(f"Page status: {error_check}")
+
+            self.log("=== END DEBUG ===")
+
+        except Exception as e:
+            self.log(f"Debug error: {e}")
+
+    def verify_game_loaded(self) -> bool:
+        """Verify that the game has actually loaded"""
+        try:
+            # Check for key game elements
+            checks = {
+                "canvas": len(self.driver.find_elements(By.TAG_NAME, "canvas")) > 0,
+                "betting_panel": len(
+                    self.driver.find_elements(
+                        By.CSS_SELECTOR, "div[data-singlebetpart]"
+                    )
+                )
+                > 0,
+                "buttons": len(self.driver.find_elements(By.TAG_NAME, "button")) > 5,
+            }
+
+            self.log(f"Game verification: {checks}")
+
+            # Consider loaded if at least canvas OR betting panel exists
+            return checks["canvas"] or checks["betting_panel"]
+
+        except Exception as e:
+            self.log(f"Verification error: {e}")
+            return False
+
     def setup_auto_cashout(self) -> bool:
         """Setup auto cashout configuration - runs every 20 rounds to keep session active"""
         try:
@@ -421,7 +613,7 @@ class CrasherBot:
             # Step 1: Wait for and click the AUTO button in FIRST panel
             self.log("Looking for AUTO button in first panel...")
 
-            max_attempts = 10
+            max_attempts = 30  # Increased from 10 to 30
             auto_button_clicked = False
 
             for attempt in range(max_attempts):
@@ -471,7 +663,7 @@ class CrasherBot:
                         time.sleep(1)
                         break
 
-                if attempt % 2 == 0:
+                if attempt % 3 == 0:  # Log every 3 seconds instead of every 2
                     self.log(
                         f"Waiting for AUTO button... (attempt {attempt + 1}/{max_attempts})"
                     )
@@ -479,6 +671,8 @@ class CrasherBot:
 
             if not auto_button_clicked:
                 self.log("⚠️  AUTO button not found after waiting")
+                # Debug: check what's on the page
+                self.debug_page_content()
                 return False
 
             # Step 2: Enable Auto Cashout toggle in FIRST panel
