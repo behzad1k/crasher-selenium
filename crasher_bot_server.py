@@ -124,7 +124,7 @@ class CrasherBot:
         logger.info(message)
 
     def init_driver(self) -> bool:
-        """Initialize undetected Chrome driver"""
+        """Initialize undetected Chrome driver - SIMPLIFIED VERSION"""
         try:
             if not UNDETECTED_AVAILABLE:
                 self.log("ERROR: undetected-chromedriver not installed!")
@@ -133,27 +133,36 @@ class CrasherBot:
 
             self.log("Initializing Chrome driver...")
             options = uc.ChromeOptions()
+
+            # Basic required options
             options.add_argument("--no-sandbox")
-            options.add_argument("--headless=new")
-            options.add_argument("--disable-software-rasterizer")
-            options.add_argument("--use-gl=swiftshader")
-            options.add_argument("--enable-webgl")
-            options.add_argument("--enable-accelerated-2d-canvas")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
+            # options.add_argument("--headless=new")
+
+            # WebGL support (required for game)
+            options.add_argument("--use-gl=swiftshader")
             options.add_argument("--enable-webgl")
 
-            self.driver = uc.Chrome(
-                options=options, version_main=None, use_subprocess=True
-            )
+            # Anti-detection (simple version)
+            options.add_argument("--disable-blink-features=AutomationControlled")
+
+            # Create driver (minimal parameters to avoid compatibility issues)
+            self.driver = uc.Chrome(options=options)
+
+            # Set timeouts
             self.driver.set_page_load_timeout(60)
             self.driver.implicitly_wait(10)
             self.wait = WebDriverWait(self.driver, 30)
 
-            self.log("✓ Driver initialized")
+            self.log("✓ Driver initialized (non-headless with Xvfb)")
             return True
+
         except Exception as e:
             self.log(f"Failed to initialize driver: {e}")
+            import traceback
+
+            self.log(traceback.format_exc())
             return False
 
     def login(self) -> bool:
