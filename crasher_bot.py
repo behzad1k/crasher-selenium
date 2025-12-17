@@ -429,9 +429,12 @@ class CrasherBot:
                             for (var i = 0; i < buttons.length; i++) {
                                 var btn = buttons[i];
                                 if (btn && btn.textContent && btn.offsetParent !== null) {
-                                    return {found: true, text: btn.textContent.trim()};
-                                } else if (btn.textContent.trim() === 'Stop'){
-                                    return {found: true, text: btn.textContent.trim()};
+                                    if(btn.textContent.trim() === 'Auto'){
+                                        return {found: true, text: btn.textContent.trim()};
+                                    }
+                                    else if (btn.textContent.trim() === 'Stop'){
+                                        return {found: true, text: btn.textContent.trim()};
+                                    }
                                 }
                             }
                             return {found: false, error: 'auto button not visible'};
@@ -887,7 +890,7 @@ class CrasherBot:
 
                     self.rounds_since_setup += 1
 
-                    if self.rounds_since_setup >= 2:
+                    if self.rounds_since_setup >= 20:
                         self.log(
                             "Re-setting up auto-cashout (keeping session active)..."
                         )
