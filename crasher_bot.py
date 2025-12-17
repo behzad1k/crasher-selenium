@@ -141,6 +141,10 @@ class CrasherBot:
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--enable-webgl")
 
+            options.add_argument("--disable-extensions")
+            options.add_argument("--disable-extensions-file-access-check")
+            options.add_argument("--disable-extensions-http-throttling")
+
             self.driver = uc.Chrome(
                 options=options, version_main=None, use_subprocess=True
             )
