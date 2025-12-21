@@ -737,7 +737,7 @@ class MultiStrategyCrasherBot:
                     self.rounds_since_setup += 1
 
                     # Keep session alive every 20 rounds (use first strategy's cashout)
-                    if self.rounds_since_setup >= 2:
+                    if self.rounds_since_setup >= 20:
                         self.log(
                             "Keeping session active (resetting auto-cashout to first strategy)..."
                         )
