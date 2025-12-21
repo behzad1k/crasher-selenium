@@ -1,11 +1,44 @@
 {
-  "username": "",
-  "password": "",
-  "game_url": "https://1000bet.in/en/play/fun/crasher-fastgames",
-  "base_bet": 1000,
-  "auto_cashout": 2,
-  "trigger_threshold": 2,
-  "trigger_count": 10,
-  "max_loss": 10000000,
-  "max_consecutive_losses": 20
+  "username": "your_email@example.com",
+  "password": "your_password",
+  "game_url": "https://1000bet.in/game/crasher",
+  "max_loss": 100000000,
+  "strategies": [
+    {
+      "name": "2x_Strategy",
+      "base_bet": 20000,
+      "auto_cashout": 2.0,
+      "trigger_threshold": 2.0,
+      "trigger_count": 8,
+      "max_consecutive_losses": 100,
+      "bet_multiplier": 2.0
+    },
+    {
+      "name": "3x_Strategy",
+      "base_bet": 1000,
+      "auto_cashout": 3.0,
+      "trigger_threshold": 3.0,
+      "trigger_count": 35,
+      "max_consecutive_losses": 100,
+      "bet_multiplier": 1.5
+    },
+    {
+      "name": "5x_Strategy",
+      "base_bet": 10000,
+      "auto_cashout": 5.0,
+      "trigger_threshold": 5.0,
+      "trigger_count": 45,
+      "max_consecutive_losses": 100,
+      "bet_multiplier": 1.25
+    },
+    {
+      "name": "10x_Strategy",
+      "base_bet": 5000,
+      "auto_cashout": 10.0,
+      "trigger_threshold": 10.0,
+      "trigger_count": 65,
+      "max_consecutive_losses": 100,
+      "bet_multiplier": 1.1112
+    }
+  ]
 }

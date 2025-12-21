@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Crasher Bot - Clean Server Version
-Observes multipliers, detects trigger, and bets with martingale strategy
+Crasher Bot - Multi-Strategy Version
+Observes multipliers and manages multiple betting strategies simultaneously
 """
 
 import json
 import logging
 import sqlite3
 import time
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 try:
     import undetected_chromedriver as uc
@@ -33,8 +34,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class StrategyState:
+    """Track state for a single strategy"""
+
+    name: str
+    base_bet: float
+    auto_cashout: float
+    trigger_threshold: float
+    trigger_count: int
+    max_consecutive_losses: int
+    bet_multiplier: float  # Custom multiplier for losses (e.g., 2.0 for martingale, 1.5 for conservative)
+
+    # Runtime state
+    current_bet: float
+    consecutive_losses: int
+    total_profit: float
+    waiting_for_result: bool
+    is_active: bool  # Whether strategy is currently active
+
+    def reset(self):
+        """Reset strategy state after win"""
+        self.current_bet = self.base_bet
+        self.consecutive_losses = 0
+        self.waiting_for_result = False
+
+    def calc_next_bet(self) -> float:
+        """Calculate next bet using custom multiplier"""
+        if self.consecutive_losses == 0:
+            return self.base_bet
+        return self.base_bet * (self.bet_multiplier**self.consecutive_losses)
+
+
 class Database:
-    """Simple database for tracking bets and multipliers"""
+    """Database for tracking bets and multipliers"""
 
     def __init__(self, db_path: str = "./crasher_data.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -53,6 +86,7 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy_name TEXT NOT NULL,
                 bet_amount REAL NOT NULL,
                 outcome TEXT CHECK(outcome IN ('win', 'loss')),
                 multiplier REAL,
@@ -78,12 +112,17 @@ class Database:
         return [row[0] for row in reversed(cursor.fetchall())]
 
     def add_bet(
-        self, bet_amount: float, outcome: str, multiplier: float, profit_loss: float
+        self,
+        strategy_name: str,
+        bet_amount: float,
+        outcome: str,
+        multiplier: float,
+        profit_loss: float,
     ):
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO bets (bet_amount, outcome, multiplier, profit_loss) VALUES (?, ?, ?, ?)",
-            (bet_amount, outcome, multiplier, profit_loss),
+            "INSERT INTO bets (strategy_name, bet_amount, outcome, multiplier, profit_loss) VALUES (?, ?, ?, ?, ?)",
+            (strategy_name, bet_amount, outcome, multiplier, profit_loss),
         )
         self.conn.commit()
 
@@ -91,34 +130,64 @@ class Database:
         self.conn.close()
 
 
-class CrasherBot:
-    """Crasher bot with trigger detection and martingale betting"""
+class MultiStrategyCrasherBot:
+    """Crasher bot with multiple strategies"""
 
     def __init__(self, config_path: str = "./bot_config.json"):
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
+        # Account credentials
         self.username = self.config["username"]
         self.password = self.config["password"]
         self.game_url = self.config["game_url"]
-        self.base_bet = float(self.config["base_bet"])
-        self.auto_cashout = float(self.config["auto_cashout"])
-        self.trigger_threshold = float(self.config["trigger_threshold"])
-        self.trigger_count = int(self.config["trigger_count"])
-        self.max_loss = float(self.config["max_loss"])
-        self.max_consecutive_losses = int(self.config["max_consecutive_losses"])
 
+        # Global limits
+        self.max_loss = float(self.config.get("max_loss", 100000000))
+
+        # Load strategies
+        self.strategies: Dict[str, StrategyState] = {}
+        self._load_strategies()
+
+        # Bot state
         self.driver = None
         self.wait = None
         self.db = Database()
-        self.current_bet = self.base_bet
-        self.consecutive_losses = 0
-        self.total_profit = 0.0
-        self.waiting_for_result = False
         self.last_seen_multiplier = None
         self.running = False
-        self.auto_cashout_configured = False
+        self.auto_cashout_configured = {}  # Track per strategy
         self.rounds_since_setup = 0
+        self.total_profit = 0.0  # Global profit across all strategies
+
+    def _load_strategies(self):
+        """Load all strategies from config"""
+        if "strategies" not in self.config:
+            raise ValueError("No 'strategies' section found in config file!")
+
+        for strategy_config in self.config["strategies"]:
+            name = strategy_config["name"]
+            strategy = StrategyState(
+                name=name,
+                base_bet=float(strategy_config["base_bet"]),
+                auto_cashout=float(strategy_config["auto_cashout"]),
+                trigger_threshold=float(strategy_config["trigger_threshold"]),
+                trigger_count=int(strategy_config["trigger_count"]),
+                max_consecutive_losses=int(
+                    strategy_config.get("max_consecutive_losses", 20)
+                ),
+                bet_multiplier=float(
+                    strategy_config.get("bet_multiplier", 2.0)
+                ),  # Default to 2.0 (standard martingale)
+                current_bet=float(strategy_config["base_bet"]),
+                consecutive_losses=0,
+                total_profit=0.0,
+                waiting_for_result=False,
+                is_active=False,
+            )
+            self.strategies[name] = strategy
+            self.log(
+                f"Loaded strategy: {name} - {strategy.trigger_count} under {strategy.trigger_threshold}x → cashout at {strategy.auto_cashout}x (multiplier: {strategy.bet_multiplier}x)"
+            )
 
     def log(self, message: str):
         try:
@@ -140,7 +209,6 @@ class CrasherBot:
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--enable-webgl")
-
             options.add_argument("--disable-extensions")
             options.add_argument("--disable-extensions-file-access-check")
             options.add_argument("--disable-extensions-http-throttling")
@@ -150,7 +218,7 @@ class CrasherBot:
             )
             self.driver.set_page_load_timeout(60)
             self.driver.implicitly_wait(10)
-            self.driver.set_script_timeout(15)  # Set default script timeout
+            self.driver.set_script_timeout(15)
             self.wait = WebDriverWait(self.driver, 30)
 
             self.log("OK Driver initialized")
@@ -233,50 +301,30 @@ class CrasherBot:
                 self.log("ERROR: No iframes found!")
                 return False
 
-            # Find the GAME iframe (the one with actual src URL, not tracking pixel)
-            self.log("Finding game iframe (looking for one with src)...")
+            # Find game iframe
             game_iframe = None
-            game_iframe_index = -1
-
             for i, iframe in enumerate(iframes):
                 iframe_src = iframe.get_attribute("src")
-                if iframe_src and len(iframe_src) > 50:  # Game iframe has long URL
+                if iframe_src and len(iframe_src) > 50:
                     game_iframe = iframe
-                    game_iframe_index = i
                     self.log(f"Found game iframe at index {i}")
-                    self.log(f"Game iframe src: {iframe_src[:80]}...")
                     break
 
             if not game_iframe:
-                self.log("ERROR: Could not find game iframe with src!")
+                self.log("ERROR: Could not find game iframe!")
                 return False
 
-            self.log(f"Switching to game iframe (index {game_iframe_index})...")
             self.driver.switch_to.frame(game_iframe)
-            time.sleep(5)  # Give iframe time to load
+            time.sleep(5)
 
-            self.log("Checking for nested iframes inside game iframe...")
+            # Check for nested iframes
             nested_iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-
             if len(nested_iframes) > 0:
-                self.log(
-                    f"Found {len(nested_iframes)} nested iframe(s)! Switching to first nested iframe..."
-                )
-                try:
-                    nested_src = nested_iframes[0].get_attribute("src")
-                    self.log(f"Nested iframe src: {nested_src}")
-                except:
-                    pass
-
                 self.driver.switch_to.frame(nested_iframes[0])
                 self.log("OK Switched to nested iframe")
                 time.sleep(3)
-            else:
-                self.log("No nested iframes found, staying in first iframe")
 
-            self.log("Waiting for dynamic content to populate...")
             self.wait_for_dynamic_content()
-
             self.close_tutorial_popup()
 
             self.log("OK Game loaded successfully!")
@@ -301,14 +349,9 @@ class CrasherBot:
             var visibleButtons = [];
             for (var i = 0; i < buttons.length; i++) {
                 var btn = buttons[i];
-                var isVisible = btn.offsetParent !== null &&
-                               window.getComputedStyle(btn).display !== 'none' &&
-                               window.getComputedStyle(btn).visibility !== 'hidden';
+                var isVisible = btn.offsetParent !== null;
                 if (isVisible) {
-                    visibleButtons.push({
-                        text: btn.textContent.trim(),
-                        className: btn.className
-                    });
+                    visibleButtons.push({text: btn.textContent.trim()});
                 }
             }
             return visibleButtons;
@@ -329,13 +372,11 @@ class CrasherBot:
                             return True
 
                     time.sleep(1)
-
-                except Exception as e:
+                except:
                     time.sleep(1)
 
             return False
-
-        except Exception as e:
+        except:
             return False
 
     def close_tutorial_popup(self):
@@ -345,253 +386,126 @@ class CrasherBot:
                 script = """
                 var buttons = document.getElementsByClassName('Qthei');
                 if (buttons.length > 0) {
-                    return {found: true, count: buttons.length, visible: buttons[0].offsetParent !== null};
+                    buttons[0].click();
+                    return true;
                 }
-                return {found: false};
+                return false;
                 """
-                result = self.driver.execute_script(script)
-
-                if result.get("found"):
-                    self.log("OK Tutorial popup found, closing...")
-                    click_script = """
-                    var buttons = document.getElementsByClassName('Qthei');
-                    if (buttons.length > 0) {
-                        buttons[0].click();
-                        return true;
-                    }
-                    return false;
-                    """
-                    clicked = self.driver.execute_script(click_script)
-                    if clicked:
-                        self.log("OK Tutorial popup closed")
-                        time.sleep(2)
-                        return
+                if self.driver.execute_script(script):
+                    self.log("OK Tutorial popup closed")
+                    time.sleep(2)
+                    return
                 time.sleep(1)
-
-            for attempt in range(30):
-                script = """
-                var buttons = document.getElementsByClassName('popup_action');
-                if (buttons.length > 0) {
-                    return {found: true, count: buttons.length};
-                }
-                return {found: false};
-                """
-                result = self.driver.execute_script(script)
-
-                if result.get("found"):
-                    self.log("OK Tutorial popup found (popup_action), closing...")
-                    click_script = """
-                    var buttons = document.getElementsByClassName('popup_action');
-                    if (buttons.length > 0) {
-                        buttons[buttons.length - 1].click();
-                        return true;
-                    }
-                    return false;
-                    """
-                    clicked = self.driver.execute_script(click_script)
-                    if clicked:
-                        self.log("OK Tutorial popup closed")
-                        time.sleep(2)
-                        return
-                time.sleep(1)
-
-        except Exception as e:
+        except:
             pass
 
-    def setup_auto_cashout(self, max_retries: int = 3) -> bool:
-        """Setup auto cashout configuration with retries"""
+    def setup_auto_cashout(self, strategy: StrategyState, max_retries: int = 3) -> bool:
+        """Setup auto cashout for a specific strategy"""
         for retry_attempt in range(max_retries):
             try:
                 if retry_attempt > 0:
                     self.log(
-                        f"Retrying auto cashout setup (attempt {retry_attempt + 1}/{max_retries})..."
+                        f"[{strategy.name}] Retry attempt {retry_attempt + 1}/{max_retries}"
                     )
-                    time.sleep(3)
+                    time.sleep(2)
 
-                self.driver.set_script_timeout(10)  # 10 second timeout per script
-
-                self.log(f"Setting up auto cashout at {self.auto_cashout}x...")
-                self.log("Looking for AUTO button in first panel...")
-
-                max_attempts = 15
-                auto_button_clicked = False
-
-                for attempt in range(max_attempts):
-                    try:
-                        script = """
-                        try {
-                            var panels = document.querySelectorAll('div[data-singlebetpart]');
-                            if (!panels || panels.length === 0) return {found: false, error: 'no panels'};
-                            var firstPanel = panels[0];
-                            if (!firstPanel) return {found: false, error: 'no first panel'};
-                            var buttons = firstPanel.querySelectorAll('button');
-                            if (!buttons) return {found: false, error: 'no buttons'};
-                            for (var i = 0; i < buttons.length; i++) {
-                                var btn = buttons[i];
-                                if (btn && btn.textContent && btn.offsetParent !== null) {
-                                    if (btn.textContent.trim() == 'AUTO'){
-                                        return {found: true, text: btn.textContent.trim()};
-                                    } else {
-                                        return {found: true, text: btn.textContent.trim()};
-                                    }
-                                }
-                            }
-                            return {found: false, error: 'auto button not visible'};
-                        } catch(e) {
-                            return {found: false, error: e.toString()};
-                        }
-                        """
-
-                        result = self.driver.execute_script(script)
-                        if result.get("found"):
-                            click_script = """
-                            try {
-                                var panels = document.querySelectorAll('div[data-singlebetpart]');
-                                var firstPanel = panels[0];
-                                var buttons = firstPanel.querySelectorAll('button');
-                                for (var i = 0; i < buttons.length; i++) {
-                                    var btn = buttons[i];
-                                    if (btn.textContent.trim() === 'Auto' && btn.offsetParent !== null) {
-                                        btn.click();
-                                        return {clicked: true};
-                                    }
-                                }
-                                return {clicked: false};
-                            } catch(e) {
-                                return {clicked: false, error: e.toString()};
-                            }
-                            """
-
-                            clicked_result = self.driver.execute_script(click_script)
-
-                            if (
-                                clicked_result.get("clicked")
-                                or result.get("text") == "Stop"
-                            ):
-                                self.log("OK AUTO button clicked (first panel)")
-                                auto_button_clicked = True
-                                time.sleep(1)
-                                break
-
-                        time.sleep(1)
-
-                    except TimeoutException:
-                        self.log(
-                            f"Script timeout on attempt {attempt + 1}, retrying..."
-                        )
-                        time.sleep(1)
-                        continue
-
-                if not auto_button_clicked:
-                    raise Exception("AUTO button not found after waiting")
-
-                self.log("Enabling Auto Cashout toggle in first panel...")
-
-                toggle_script = """
+                # Click AUTO button
+                auto_script = """
                 try {
                     var panels = document.querySelectorAll('div[data-singlebetpart]');
                     var firstPanel = panels[0];
-                    var toggle = firstPanel.querySelector('input[data-testid="aut-co-tgl"]');
-                    if (toggle) {
-                        if (!toggle.checked) {
-                            toggle.click();
+                    var buttons = firstPanel.querySelectorAll('button');
+                    for (var i = 0; i < buttons.length; i++) {
+                        var btn = buttons[i];
+                        if (btn.offsetParent !== null) {
+                            if(btn.textContent.trim().toLowerCase() === 'auto'){
+                                btn.click();
+                                return {clicked: true};
+                            }
+                            else if (btn.textContent.trim().toLowerCase() === 'stop'){
+                                return {clicked: true};
+                            }
                         }
-                        return {found: true, enabled: toggle.checked};
                     }
-                    return {found: false};
+                    return {clicked: false};
                 } catch(e) {
-                    return {found: false, error: e.toString()};
+                    return {clicked: false, error: e.toString()};
                 }
                 """
 
-                result = self.driver.execute_script(toggle_script)
+                result = self.driver.execute_script(auto_script)
+                if not result.get("clicked"):
+                    raise Exception("AUTO button not found")
 
-                if not result.get("found"):
-                    raise Exception("Auto Cashout toggle not found in first panel")
+                time.sleep(0.2)
 
-                self.log("OK Auto Cashout toggle enabled")
-                time.sleep(1.5)
+                # Enable auto cashout toggle
+                toggle_script = """
+                try {
+                    var panels = document.querySelectorAll('div[data-singlebetpart]');
+                    var toggle = panels[0].querySelector('input[data-testid="aut-co-tgl"]');
+                    if (toggle && !toggle.checked) {
+                        toggle.click();
+                    }
+                    return {found: toggle !== null};
+                } catch(e) {
+                    return {found: false};
+                }
+                """
 
-                self.log(f"Setting auto cashout value to {self.auto_cashout}x...")
+                self.driver.execute_script(toggle_script)
+                time.sleep(0.2)
 
-                # Use Selenium native methods with shorter timeout for input
-                try:
-                    from selenium.webdriver.common.keys import Keys
+                # Set cashout value with scroll and proper wait
+                from selenium.webdriver.common.action_chains import ActionChains
+                from selenium.webdriver.common.keys import Keys
 
-                    panels = self.driver.find_elements(
-                        By.CSS_SELECTOR, "div[data-singlebetpart]"
+                panels = self.driver.find_elements(
+                    By.CSS_SELECTOR, "div[data-singlebetpart]"
+                )
+                auto_input = panels[0].find_element(
+                    By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]'
+                )
+
+                # Scroll element into view
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", auto_input
+                )
+                time.sleep(0.1)
+
+                # Use ActionChains for more reliable interaction
+                actions = ActionChains(self.driver)
+                actions.move_to_element(auto_input).click().perform()
+                time.sleep(0.1)
+
+                # Clear existing value
+                for _ in range(5):
+                    auto_input.send_keys(Keys.BACKSPACE)
+                time.sleep(0.1)
+
+                # Enter new value
+                auto_input.send_keys(str(strategy.auto_cashout))
+                time.sleep(0.1)
+
+                # Verify the value was set
+                final_value = auto_input.get_attribute("value")
+
+                if abs(float(final_value) - strategy.auto_cashout) < 0.01:
+                    self.log(f"[{strategy.name}] ✓ Auto cashout set to {final_value}x")
+                    self.auto_cashout_configured[strategy.name] = True
+                    return True
+                else:
+                    self.log(
+                        f"[{strategy.name}] WARNING: Expected {strategy.auto_cashout}, got {final_value}"
                     )
-                    if not panels:
-                        raise Exception("No betting panels found")
-
-                    first_panel = panels[0]
-
-                    # Wait for input to be present and clickable
-                    auto_input = WebDriverWait(first_panel, 5).until(
-                        EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]')
-                        )
-                    )
-
-                    # Clear and set value
-                    auto_input.click()
-                    time.sleep(0.3)
-
-                    # Clear existing value
-                    for _i in range(0, 4):
-                        auto_input.send_keys(Keys.BACKSPACE)
-                    time.sleep(0.2)
-
-                    # Enter new value
-                    auto_input.send_keys(str(self.auto_cashout))
-                    time.sleep(0.5)
-
-                    # Verify the value was set
-                    final_value = auto_input.get_attribute("value")
-                    self.log(f"OK Auto cashout set to {final_value}x")
-
-                    if float(final_value) != self.auto_cashout:
-                        self.log(
-                            f"WARNING: Expected {self.auto_cashout}, got {final_value}"
-                        )
-                        # Try one more time
-                        auto_input.click()
-                        time.sleep(0.2)
-                        for _i in range(0, 4):
-                            auto_input.send_keys(Keys.BACKSPACE)
-                        time.sleep(0.2)
-                        auto_input.send_keys(str(self.auto_cashout))
-                        time.sleep(0.5)
-                        final_value = auto_input.get_attribute("value")
-                        self.log(f"Retry: Auto cashout now set to {final_value}x")
-
-                except TimeoutException:
-                    raise Exception("Timeout waiting for auto cashout input field")
-                except Exception as e:
-                    raise Exception(f"Failed to set auto cashout value: {e}")
-
-                time.sleep(1)
-
-                self.auto_cashout_configured = True
-                self.rounds_since_setup = 0
-                self.log("OK Auto cashout configuration complete!")
-
-                return True
-
-            except TimeoutException as e:
-                self.log(f"Setup timeout on attempt {retry_attempt + 1}: {e}")
-                if retry_attempt == max_retries - 1:
+                    if retry_attempt < max_retries - 1:
+                        continue
                     return False
-                continue
 
             except Exception as e:
-                self.log(f"Setup failed on attempt {retry_attempt + 1}: {e}")
+                self.log(f"[{strategy.name}] Setup error: {str(e)[:100]}")
                 if retry_attempt == max_retries - 1:
-                    import traceback
-
-                    self.log(traceback.format_exc())
                     return False
-                continue
 
         return False
 
@@ -600,20 +514,13 @@ class CrasherBot:
         try:
             script = """
             var span = document.querySelector('span[data-testid="b-ct-spn"]');
-            if (span) {
-                return span.textContent || span.innerText;
-            }
-            return null;
+            return span ? span.textContent : null;
             """
-
             count_text = self.driver.execute_script(script)
-
             if count_text and str(count_text).strip().isdigit():
                 return int(count_text)
-
             return None
-
-        except Exception as e:
+        except:
             return None
 
     def get_bank_balance(self) -> Optional[float]:
@@ -621,14 +528,9 @@ class CrasherBot:
         try:
             script = """
             var span = document.querySelector('span[data-testid="amount-box_amount"]');
-            if (span) {
-                return span.textContent || span.innerText;
-            }
-            return null;
+            return span ? span.textContent : null;
             """
-
             balance_text = self.driver.execute_script(script)
-
             if balance_text:
                 balance_str = (
                     str(balance_text).strip().replace(",", "").replace(" ", "")
@@ -637,10 +539,8 @@ class CrasherBot:
                     return float(balance_str)
                 except ValueError:
                     return None
-
             return None
-
-        except Exception as e:
+        except:
             return None
 
     def detect_current_multiplier(self) -> Optional[float]:
@@ -649,23 +549,13 @@ class CrasherBot:
             script = """
             var mainMult = document.querySelector('span.ZmRXV');
             if (mainMult) {
-                var text = mainMult.textContent.trim();
-                var className = mainMult.className;
-                var hasEnded = className.includes('false');
-                return {
-                    found: true,
-                    text: text,
-                    hasEnded: hasEnded
-                };
+                var hasEnded = mainMult.className.includes('false');
+                return {text: mainMult.textContent.trim(), hasEnded: hasEnded};
             }
             return {found: false};
             """
 
             result = self.driver.execute_script(script)
-
-            if not result.get("found"):
-                return None
-
             if not result.get("hasEnded"):
                 return None
 
@@ -675,33 +565,32 @@ class CrasherBot:
 
                 match = re.search(r"(\d+\.?\d*)x", text, re.IGNORECASE)
                 if match:
-                    mult_str = match.group(1)
-                    mult = float(mult_str)
+                    mult = float(match.group(1))
                     if 1.0 <= mult <= 10000.0:
                         return mult
-
+            return None
+        except:
             return None
 
-        except Exception as e:
-            return None
+    def check_trigger(self, strategy: StrategyState) -> bool:
+        """Check if trigger conditions are met for a strategy"""
+        recent = self.db.get_recent_multipliers(strategy.trigger_count)
 
-    def check_trigger(self) -> bool:
-        """Check if trigger conditions are met"""
-        recent = self.db.get_recent_multipliers(self.trigger_count)
-
-        if len(recent) < self.trigger_count:
+        if len(recent) < strategy.trigger_count:
             return False
 
-        all_under = all(m < self.trigger_threshold for m in recent)
+        all_under = all(m < strategy.trigger_threshold for m in recent)
 
         if all_under:
-            self.log(f"TRIGGER: Last {self.trigger_count} rounds: {recent}")
+            self.log(
+                f"[{strategy.name}] TRIGGER: Last {strategy.trigger_count} rounds under {strategy.trigger_threshold}x"
+            )
             return True
 
         return False
 
-    def enter_bet_amount(self, amount: float) -> bool:
-        """Enter bet amount in FIRST betting panel"""
+    def place_bet(self, strategy: StrategyState, amount: float) -> bool:
+        """Place a bet for a strategy"""
         try:
             from selenium.webdriver.common.keys import Keys
 
@@ -709,113 +598,67 @@ class CrasherBot:
                 By.CSS_SELECTOR, "div[data-singlebetpart]"
             )
             if not panels:
-                self.log("WARNING: No betting panels found!")
                 return False
 
-            first_panel = panels[0]
-
-            bet_input = WebDriverWait(first_panel, 5).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, 'input[data-testid="bp-inp"]')
-                )
+            bet_input = panels[0].find_element(
+                By.CSS_SELECTOR, 'input[data-testid="bp-inp"]'
             )
-
             bet_input.click()
-            time.sleep(0.2)
+            time.sleep(0.1)
 
-            # Clear existing value
-            for _i in range(0, 8):
+            for _ in range(8):
                 bet_input.send_keys(Keys.BACKSPACE)
-            time.sleep(0.2)
+            time.sleep(0.1)
 
             bet_input.send_keys(str(int(amount)))
-            time.sleep(0.3)
+            time.sleep(0.1)
 
-            final_value = bet_input.get_attribute("value")
-            self.log(f"OK Bet amount set to {final_value} (first panel)")
-
-            return True
-
-        except Exception as e:
-            self.log(f"Failed to enter bet amount: {e}")
-            import traceback
-
-            self.log(traceback.format_exc())
-            return False
-
-    def click_bet_button(self) -> bool:
-        """Click the BET button in FIRST panel"""
-        try:
-            panels = self.driver.find_elements(
-                By.CSS_SELECTOR, "div[data-singlebetpart]"
-            )
-            if not panels:
-                self.log("WARNING: No betting panels found!")
-                return False
-
-            first_panel = panels[0]
-
-            bet_button = first_panel.find_element(
+            bet_button = panels[0].find_element(
                 By.CSS_SELECTOR, 'button[data-testid="b-btn"]'
             )
-
             bet_button.click()
-            self.log("OK BET button clicked (first panel)")
-            time.sleep(0.5)
+            time.sleep(0.1)
 
+            self.log(f"[{strategy.name}] BET PLACED: {amount}")
             return True
 
         except Exception as e:
-            self.log(f"Failed to click bet button: {e}")
-            import traceback
-
-            self.log(traceback.format_exc())
+            self.log(f"[{strategy.name}] Failed to place bet: {e}")
             return False
 
-    def place_bet(self, amount: float) -> bool:
-        """Place a bet"""
-        if not self.enter_bet_amount(amount):
-            return False
-
-        if not self.click_bet_button():
-            return False
-
-        self.waiting_for_result = True
-        return True
-
-    def calc_next_bet(self) -> float:
-        """Calculate next bet using martingale"""
-        if self.consecutive_losses == 0:
-            return self.base_bet
-        return self.base_bet * (2**self.consecutive_losses)
-
-    def handle_result(self, multiplier: float):
-        """Handle bet result"""
-        if multiplier >= self.auto_cashout:
-            profit = self.current_bet * (self.auto_cashout - 1)
+    def handle_result(self, strategy: StrategyState, multiplier: float):
+        """Handle bet result for a strategy"""
+        if multiplier >= strategy.auto_cashout:
+            profit = strategy.current_bet * (strategy.auto_cashout - 1)
+            strategy.total_profit += profit
             self.total_profit += profit
-            self.db.add_bet(self.current_bet, "win", multiplier, profit)
-            self.consecutive_losses = 0
-            self.current_bet = self.base_bet
+            self.db.add_bet(
+                strategy.name, strategy.current_bet, "win", multiplier, profit
+            )
 
             self.log(
-                f"SUCCESS: WIN! {multiplier}x | Profit: +{profit:.0f} | Total: {self.total_profit:.0f}"
+                f"[{strategy.name}] ✓ WIN! {multiplier}x | Profit: +{profit:.0f} | Strategy Total: {strategy.total_profit:.0f} | Global Total: {self.total_profit:.0f}"
             )
+
+            strategy.reset()
         else:
-            loss = self.current_bet
+            loss = strategy.current_bet
+            strategy.total_profit -= loss
             self.total_profit -= loss
-            self.db.add_bet(self.current_bet, "loss", multiplier, -loss)
-            self.consecutive_losses += 1
-            self.current_bet = self.calc_next_bet()
+            self.db.add_bet(
+                strategy.name, strategy.current_bet, "loss", multiplier, -loss
+            )
+            strategy.consecutive_losses += 1
+            strategy.current_bet = strategy.calc_next_bet()
 
             self.log(
-                f"ERROR: LOSS! {multiplier}x | Loss: -{loss:.0f} | Total: {self.total_profit:.0f}"
+                f"[{strategy.name}] ✗ LOSS! {multiplier}x | Loss: -{loss:.0f} | Strategy Total: {strategy.total_profit:.0f} | Global Total: {self.total_profit:.0f}"
             )
             self.log(
-                f"   Consecutive losses: {self.consecutive_losses} | Next bet: {self.current_bet:.0f}"
+                f"[{strategy.name}]    Consecutive losses: {strategy.consecutive_losses} | Next bet: {strategy.current_bet:.0f}"
             )
 
-        self.waiting_for_result = False
+        strategy.waiting_for_result = False
 
     def check_stop_conditions(self) -> bool:
         """Check if we should stop"""
@@ -823,11 +666,13 @@ class CrasherBot:
             self.log(f"STOP: Max loss reached ({abs(self.total_profit):.0f})")
             return False
 
-        if self.consecutive_losses >= self.max_consecutive_losses:
-            self.log(
-                f"STOP: Max consecutive losses reached ({self.consecutive_losses})"
-            )
-            return False
+        # Check each strategy
+        for name, strategy in self.strategies.items():
+            if strategy.consecutive_losses >= strategy.max_consecutive_losses:
+                self.log(
+                    f"STOP: [{name}] Max consecutive losses reached ({strategy.consecutive_losses})"
+                )
+                return False
 
         return True
 
@@ -835,7 +680,7 @@ class CrasherBot:
         """Main bot loop"""
         try:
             self.log("=" * 60)
-            self.log("CRASHER BOT STARTING")
+            self.log("MULTI-STRATEGY CRASHER BOT STARTING")
             self.log("=" * 60)
 
             if not self.init_driver():
@@ -847,35 +692,39 @@ class CrasherBot:
             if not self.navigate_to_game():
                 return
 
-            # Try setup with retries
-            setup_success = False
-            for i in range(3):
-                if self.setup_auto_cashout():
-                    setup_success = True
-                    break
-                self.log(f"Setup attempt {i + 1} failed, retrying in 5 seconds...")
-                time.sleep(5)
-
-            if not setup_success:
-                self.log("WARNING: Could not setup auto cashout after 3 attempts")
-                self.log(
-                    "Bot will continue monitoring, but betting may not work properly"
-                )
+            # Initial setup with first strategy's cashout (for session keep-alive)
+            first_strategy = list(self.strategies.values())[0]
+            if not self.setup_auto_cashout(first_strategy):
+                self.log(f"WARNING: Could not setup initial auto cashout")
 
             self.log("=" * 60)
-            self.log("CONFIGURATION:")
-            self.log(f"   Base Bet: {self.base_bet}")
-            self.log(f"   Auto Cashout: {self.auto_cashout}x")
+            self.log("ACTIVE STRATEGIES:")
+            for name, strategy in self.strategies.items():
+                self.log(f"  [{name}]")
+                self.log(f"    Base Bet: {strategy.base_bet}")
+                self.log(f"    Auto Cashout: {strategy.auto_cashout}x")
+                self.log(
+                    f"    Trigger: {strategy.trigger_count} rounds under {strategy.trigger_threshold}x"
+                )
+                self.log(f"    Bet Multiplier: {strategy.bet_multiplier}x (after loss)")
+                self.log(
+                    f"    Max Consecutive Losses: {strategy.max_consecutive_losses}"
+                )
+            self.log(f"  Global Max Loss: {self.max_loss}")
+            self.log("=" * 60)
+            self.log("STRATEGY RULES:")
+            self.log("  - Only ONE strategy can bet at a time")
+            self.log("  - Active strategy has exclusive access to bank")
             self.log(
-                f"   Trigger: {self.trigger_count} rounds under {self.trigger_threshold}x"
+                "  - Other strategies monitor but don't bet until active one finishes"
             )
-            self.log(f"   Max Loss: {self.max_loss}")
-            self.log(f"   Max Consecutive Losses: {self.max_consecutive_losses}")
+            self.log("  - Auto-cashout configured ONLY when placing bet")
             self.log("=" * 60)
             self.log("BOT RUNNING - Monitoring multipliers...")
             self.log("=" * 60)
 
             self.running = True
+            active_strategy_name = None  # Track which strategy is currently active
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -885,45 +734,75 @@ class CrasherBot:
 
                 if new_mult and new_mult != self.last_seen_multiplier:
                     self.last_seen_multiplier = new_mult
-
                     self.rounds_since_setup += 1
 
-                    if self.rounds_since_setup >= 20:
+                    # Keep session alive every 20 rounds (use first strategy's cashout)
+                    if self.rounds_since_setup >= 2:
                         self.log(
-                            "Re-setting up auto-cashout (keeping session active)..."
+                            "Keeping session active (resetting auto-cashout to first strategy)..."
                         )
-                        self.setup_auto_cashout()
+                        self.setup_auto_cashout(first_strategy)
+                        self.rounds_since_setup = 0
 
                     bettor_count = self.get_bettor_count()
-
                     bank_balance = self.get_bank_balance()
 
                     log_parts = [f"Round ended: {new_mult}x"]
-
                     if bettor_count:
                         log_parts.append(f"Bettors: {bettor_count}")
-
                     if bank_balance is not None:
                         log_parts.append(f"Bank: {bank_balance:,.0f}")
 
                     self.log(" | ".join(log_parts))
-
                     self.db.add_multiplier(new_mult, bettor_count)
 
-                    if self.waiting_for_result:
-                        self.handle_result(new_mult)
+                    # Handle active strategy result first
+                    if active_strategy_name:
+                        active_strategy = self.strategies[active_strategy_name]
+                        if active_strategy.waiting_for_result:
+                            self.handle_result(active_strategy, new_mult)
 
-                    if not self.waiting_for_result and self.check_trigger():
-                        time.sleep(2)
-                        bet_amount = self.calc_next_bet()
-                        self.log(f"Placing bet: {bet_amount}")
+                            # If strategy finished (no longer waiting), clear active status
+                            if not active_strategy.waiting_for_result:
+                                self.log(
+                                    f"[{active_strategy_name}] Strategy finished, releasing bank"
+                                )
+                                active_strategy_name = None
 
-                        if self.place_bet(bet_amount):
-                            self.current_bet = bet_amount
-                        else:
-                            self.log("WARNING: Failed to place bet!")
+                    # Only check for new triggers if NO strategy is currently active
+                    if not active_strategy_name:
+                        # Check all strategies for triggers (in order)
+                        for name, strategy in self.strategies.items():
+                            if not strategy.waiting_for_result and self.check_trigger(
+                                strategy
+                            ):
+                                # This strategy triggered!
+                                self.log(
+                                    f"[{name}] Strategy ACTIVATED - Taking exclusive control of bank"
+                                )
 
-                time.sleep(0.5)
+                                # Setup auto-cashout specifically for THIS strategy
+                                self.log(
+                                    f"[{name}] Configuring auto-cashout to {strategy.auto_cashout}x..."
+                                )
+                                if not self.setup_auto_cashout(strategy):
+                                    self.log(
+                                        f"[{name}] WARNING: Failed to setup auto-cashout, skipping bet"
+                                    )
+                                    continue
+
+                                time.sleep(2)
+                                bet_amount = strategy.calc_next_bet()
+
+                                if self.place_bet(strategy, bet_amount):
+                                    strategy.current_bet = bet_amount
+                                    strategy.waiting_for_result = True
+                                    active_strategy_name = (
+                                        name  # Mark this strategy as active
+                                    )
+                                    break  # Only activate ONE strategy per round
+
+                time.sleep(0.1)
 
         except KeyboardInterrupt:
             self.log("\nBot stopped by user")
@@ -936,8 +815,12 @@ class CrasherBot:
             self.running = False
             self.log("=" * 60)
             self.log("SESSION SUMMARY:")
-            self.log(f"   Total Profit/Loss: {self.total_profit:.0f}")
-            self.log(f"   Consecutive Losses: {self.consecutive_losses}")
+            self.log(f"   Global Total Profit/Loss: {self.total_profit:.0f}")
+
+            for name, strategy in self.strategies.items():
+                self.log(f"   [{name}]:")
+                self.log(f"     Profit/Loss: {strategy.total_profit:.0f}")
+                self.log(f"     Consecutive Losses: {strategy.consecutive_losses}")
 
             try:
                 final_balance = self.get_bank_balance()
@@ -956,7 +839,7 @@ class CrasherBot:
 
 def main():
     try:
-        bot = CrasherBot(config_path="./bot_config.json")
+        bot = MultiStrategyCrasherBot(config_path="./bot_config.json")
         bot.run()
     except FileNotFoundError:
         logger.error("Config file 'bot_config.json' not found!")
