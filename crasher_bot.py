@@ -576,7 +576,8 @@ class MultiStrategyCrasherBot:
         """Check if trigger conditions are met for a strategy"""
         recent = self.db.get_recent_multipliers(strategy.trigger_count)
 
-        if len(recent) < strategy.trigger_count:
+        # Need EXACT count of multipliers to trigger (prevents false triggers on startup)
+        if len(recent) != strategy.trigger_count:
             return False
 
         all_under = all(m < strategy.trigger_threshold for m in recent)
@@ -719,6 +720,9 @@ class MultiStrategyCrasherBot:
                 "  - Other strategies monitor but don't bet until active one finishes"
             )
             self.log("  - Auto-cashout configured ONLY when placing bet")
+            self.log(
+                f"  - Need EXACT {max(s.trigger_count for s in self.strategies.values())} rounds before any triggers (prevents false triggers)"
+            )
             self.log("=" * 60)
             self.log("BOT RUNNING - Monitoring multipliers...")
             self.log("=" * 60)
