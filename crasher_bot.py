@@ -86,7 +86,7 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy_name TEXT NOT NULL,
+                strategy_name TEXT NULL,
                 bet_amount REAL NOT NULL,
                 outcome TEXT CHECK(outcome IN ('win', 'loss')),
                 multiplier REAL,
