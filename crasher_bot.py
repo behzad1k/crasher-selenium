@@ -947,16 +947,21 @@ class MultiStrategyCrasherBot:
             return None
 
     def get_bank_balance(self) -> Optional[float]:
-        """Get current bank balance"""
+        """Get current bank balance from lblBalance div"""
         try:
             script = """
-            var span = document.querySelector('span[data-testid="amount-box_amount"]');
-            return span ? span.textContent : null;
+            var balanceDiv = document.getElementById('lblBalance');
+            return balanceDiv ? balanceDiv.textContent : null;
             """
             balance_text = self.driver.execute_script(script)
             if balance_text:
+                # Remove 'IRT', commas, and any extra whitespace
                 balance_str = (
-                    str(balance_text).strip().replace(",", "").replace(" ", "")
+                    str(balance_text)
+                    .strip()
+                    .replace("IRT", "")
+                    .replace(",", "")
+                    .replace(" ", "")
                 )
                 try:
                     return float(balance_str)
