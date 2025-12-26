@@ -17,7 +17,27 @@ class LosingStreakAnalyzer:
 
     def __init__(self, db_path: str = "./crasher_data.db"):
         self.conn = sqlite3.connect(db_path)
-        self.thresholds = [4.0, 6.0, 7.0, 8.0, 9.0]
+        self.thresholds = [
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+            8.0,
+            9.0,
+            10.0,
+            11.0,
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0,
+            17.0,
+            18.0,
+            19.0,
+            20.0,
+        ]
 
     def load_data_by_session(self) -> Dict[int, List[Tuple]]:
         """
