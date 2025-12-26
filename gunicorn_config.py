@@ -26,9 +26,9 @@ group = None
 tmp_upload_dir = None
 
 # Logging
-errorlog = "/var/log/crasher/error.log"
+errorlog = "/var/log/crasher_error.log"
 loglevel = "info"
-accesslog = "/var/log/crasher/access.log"
+accesslog = "/var/log/crasher_access.log"
 access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
 
 # Process naming
