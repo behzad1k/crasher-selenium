@@ -650,9 +650,9 @@ class MultiStrategyCrasherBot:
                 options=options, version_main=None, use_subprocess=True
             )
             self.driver.set_page_load_timeout(60)
-            self.driver.implicitly_wait(10)
-            self.driver.set_script_timeout(15)
-            self.wait = WebDriverWait(self.driver, 30)
+            self.driver.implicitly_wait(60)
+            self.driver.set_script_timeout(60)
+            self.wait = WebDriverWait(self.driver, 60)
 
             self.log("OK Driver initialized")
             return True
