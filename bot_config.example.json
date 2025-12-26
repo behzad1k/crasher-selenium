@@ -3,6 +3,7 @@
   "password": "your_password",
   "game_url": "https://1000bet.in/game/crasher",
   "max_loss": 100000000,
+  "import_recent_on_new_session": true,
   "strategies": [
     {
       "name": "2x_Strategy",

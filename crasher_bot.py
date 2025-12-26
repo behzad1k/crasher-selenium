@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Crasher Bot - Multi-Strategy Version
-Observes multipliers and manages multiple betting strategies simultaneously
+Crasher Bot - Enhanced with Session Recovery
+Reads recent multipliers from page and matches with database to continue sessions
 """
 
 import json
@@ -9,7 +9,8 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 
 try:
     import undetected_chromedriver as uc
@@ -44,14 +45,14 @@ class StrategyState:
     trigger_threshold: float
     trigger_count: int
     max_consecutive_losses: int
-    bet_multiplier: float  # Custom multiplier for losses (e.g., 2.0 for martingale, 1.5 for conservative)
+    bet_multiplier: float
 
     # Runtime state
     current_bet: float
     consecutive_losses: int
     total_profit: float
     waiting_for_result: bool
-    is_active: bool  # Whether strategy is currently active
+    is_active: bool
 
     def reset(self):
         """Reset strategy state after win"""
@@ -66,12 +67,216 @@ class StrategyState:
         return self.base_bet * (self.bet_multiplier**self.consecutive_losses)
 
 
+class SessionManager:
+    """Manages session creation and recovery"""
+
+    def __init__(self, conn: sqlite3.Connection, logger_func=None):
+        self.conn = conn
+        self.log = logger_func or print
+        self._ensure_sessions_table()
+
+    def _ensure_sessions_table(self):
+        """Ensure sessions table exists"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_timestamp DATETIME NOT NULL,
+                end_timestamp DATETIME,
+                start_balance REAL,
+                end_balance REAL,
+                total_rounds INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Check if multipliers table has session_id column
+        cursor.execute("PRAGMA table_info(multipliers)")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if "session_id" not in columns:
+            cursor.execute(
+                "ALTER TABLE multipliers ADD COLUMN session_id INTEGER REFERENCES sessions(id)"
+            )
+
+        self.conn.commit()
+
+    def get_last_session(self) -> Optional[Tuple[int, datetime, int]]:
+        """Get last session info: (session_id, last_timestamp, round_count)"""
+        cursor = self.conn.cursor()
+
+        # First, check if we have any sessions at all
+        cursor.execute("SELECT COUNT(*) FROM sessions")
+        session_count = cursor.fetchone()[0]
+
+        if session_count == 0:
+            # No sessions exist yet - check if we have old multipliers without session_id
+            cursor.execute("""
+                SELECT COUNT(*), MAX(timestamp)
+                FROM multipliers
+                WHERE session_id IS NULL
+            """)
+            old_count, old_last = cursor.fetchone()
+
+            if old_count and old_count > 0:
+                self.log(
+                    f"Found {old_count} old multipliers without session (migrating...)"
+                )
+                # Create a session for old data
+                cursor.execute("""
+                    INSERT INTO sessions (start_timestamp, end_timestamp)
+                    VALUES (
+                        (SELECT MIN(timestamp) FROM multipliers WHERE session_id IS NULL),
+                        (SELECT MAX(timestamp) FROM multipliers WHERE session_id IS NULL)
+                    )
+                """)
+                new_session_id = cursor.lastrowid
+
+                # Assign old multipliers to this session
+                cursor.execute(
+                    """
+                    UPDATE multipliers
+                    SET session_id = ?
+                    WHERE session_id IS NULL
+                """,
+                    (new_session_id,),
+                )
+
+                self.conn.commit()
+                self.log(f"✓ Migrated old data to session #{new_session_id}")
+
+                # Now fall through to normal query
+
+        # Get the last session without end_timestamp (active session)
+        cursor.execute("""
+            SELECT s.id, MAX(m.timestamp), COUNT(m.id)
+            FROM sessions s
+            LEFT JOIN multipliers m ON s.id = m.session_id
+            GROUP BY s.id
+            ORDER BY s.id DESC
+            LIMIT 1
+        """)
+
+        result = cursor.fetchone()
+        return result if result and result[1] else None
+
+    def get_last_n_multipliers_from_session(
+        self, session_id: int, n: int
+    ) -> List[float]:
+        """Get last N multipliers from a session in chronological order"""
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT multiplier
+            FROM multipliers
+            WHERE session_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """,
+            (session_id, n),
+        )
+
+        # Reverse to get chronological order (oldest to newest)
+        return [row[0] for row in reversed(cursor.fetchall())]
+
+    def create_session(self, start_balance: Optional[float] = None) -> int:
+        """Create new session and return session_id"""
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO sessions (start_timestamp, start_balance)
+            VALUES (?, ?)
+        """,
+            (datetime.now(), start_balance),
+        )
+
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def update_session_end(self, session_id: int, end_balance: Optional[float] = None):
+        """Update session end time and balance"""
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            UPDATE sessions
+            SET end_timestamp = ?, end_balance = ?
+            WHERE id = ?
+        """,
+            (datetime.now(), end_balance, session_id),
+        )
+
+        self.conn.commit()
+
+    def add_missing_rounds(
+        self,
+        session_id: int,
+        multipliers: List[float],
+        start_time: datetime,
+        end_time: datetime,
+    ):
+        """
+        Add missing rounds to database with estimated timestamps
+
+        Args:
+            session_id: Session to add rounds to
+            multipliers: List of multipliers (chronological order)
+            start_time: Time of first missing round (estimate)
+            end_time: Time of last missing round (actual)
+        """
+        if not multipliers:
+            return
+
+        cursor = self.conn.cursor()
+
+        # Calculate time per round
+        total_seconds = (end_time - start_time).total_seconds()
+        seconds_per_round = (
+            total_seconds / len(multipliers) if len(multipliers) > 1 else 0
+        )
+
+        # Insert each missing round with estimated timestamp
+        for i, mult in enumerate(multipliers):
+            # Calculate timestamp for this round
+            if i == len(multipliers) - 1:
+                # Last round uses actual end_time
+                timestamp = end_time
+            else:
+                # Estimate timestamp
+                timestamp = start_time + timedelta(seconds=seconds_per_round * (i + 1))
+
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO multipliers (multiplier, session_id, timestamp)
+                    VALUES (?, ?, ?)
+                """,
+                    (mult, session_id, timestamp),
+                )
+            except sqlite3.IntegrityError:
+                # Skip if duplicate (shouldn't happen, but just in case)
+                pass
+
+        self.conn.commit()
+
+
 class Database:
     """Database for tracking bets and multipliers"""
 
     def __init__(self, db_path: str = "./crasher_data.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_tables()
+        # Will be set by bot after initialization
+        self.log_func = None
+        self.session_manager = None  # Initialize later with log function
+        self.current_session_id: Optional[int] = None
+
+    def set_logger(self, log_func):
+        """Set logger function and initialize session manager"""
+        self.log_func = log_func
+        self.session_manager = SessionManager(self.conn, log_func)
 
     def _init_tables(self):
         cursor = self.conn.cursor()
@@ -80,7 +285,8 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 multiplier REAL NOT NULL,
                 bettor_count INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                session_id INTEGER REFERENCES sessions(id)
             )
         """)
         cursor.execute("""
@@ -97,17 +303,26 @@ class Database:
         self.conn.commit()
 
     def add_multiplier(self, multiplier: float, bettor_count: Optional[int] = None):
+        """Add multiplier to current session"""
+        if self.current_session_id is None:
+            raise ValueError("No active session!")
+
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO multipliers (multiplier, bettor_count) VALUES (?, ?)",
-            (multiplier, bettor_count),
+            "INSERT INTO multipliers (multiplier, bettor_count, session_id) VALUES (?, ?, ?)",
+            (multiplier, bettor_count, self.current_session_id),
         )
         self.conn.commit()
 
     def get_recent_multipliers(self, count: int) -> List[float]:
+        """Get recent multipliers from current session"""
+        if self.current_session_id is None:
+            return []
+
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT multiplier FROM multipliers ORDER BY id DESC LIMIT ?", (count,)
+            "SELECT multiplier FROM multipliers WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (self.current_session_id, count),
         )
         return [row[0] for row in reversed(cursor.fetchall())]
 
@@ -131,18 +346,15 @@ class Database:
 
 
 class MultiStrategyCrasherBot:
-    """Crasher bot with multiple strategies"""
+    """Crasher bot with session recovery"""
 
     def __init__(self, config_path: str = "./bot_config.json"):
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
-        # Account credentials
         self.username = self.config["username"]
         self.password = self.config["password"]
         self.game_url = self.config["game_url"]
-
-        # Global limits
         self.max_loss = float(self.config.get("max_loss", 100000000))
 
         # Load strategies
@@ -153,11 +365,13 @@ class MultiStrategyCrasherBot:
         self.driver = None
         self.wait = None
         self.db = Database()
+        self.db.set_logger(self.log)  # Set logger after db creation
         self.last_seen_multiplier = None
+        self.last_round_time = 0  # Track time of last logged round
         self.running = False
-        self.auto_cashout_configured = {}  # Track per strategy
+        self.auto_cashout_configured = {}
         self.rounds_since_setup = 0
-        self.total_profit = 0.0  # Global profit across all strategies
+        self.total_profit = 0.0
 
     def _load_strategies(self):
         """Load all strategies from config"""
@@ -175,9 +389,7 @@ class MultiStrategyCrasherBot:
                 max_consecutive_losses=int(
                     strategy_config.get("max_consecutive_losses", 20)
                 ),
-                bet_multiplier=float(
-                    strategy_config.get("bet_multiplier", 2.0)
-                ),  # Default to 2.0 (standard martingale)
+                bet_multiplier=float(strategy_config.get("bet_multiplier", 2.0)),
                 current_bet=float(strategy_config["base_bet"]),
                 consecutive_losses=0,
                 total_profit=0.0,
@@ -185,9 +397,7 @@ class MultiStrategyCrasherBot:
                 is_active=False,
             )
             self.strategies[name] = strategy
-            self.log(
-                f"Loaded strategy: {name} - {strategy.trigger_count} under {strategy.trigger_threshold}x → cashout at {strategy.auto_cashout}x (multiplier: {strategy.bet_multiplier}x)"
-            )
+            self.log(f"Loaded strategy: {name}")
 
     def log(self, message: str):
         try:
@@ -195,6 +405,231 @@ class MultiStrategyCrasherBot:
         except UnicodeEncodeError:
             clean_msg = message.encode("ascii", "ignore").decode("ascii")
             logger.info(clean_msg)
+
+    def read_recent_multipliers_from_page(self) -> List[float]:
+        """
+        Read recent multipliers from the page's result div
+        Returns list in chronological order (oldest to newest)
+        """
+        try:
+            script = """
+            var resultItems = document.querySelectorAll('span.sc-w0koce-1.giBFzM');
+            var multipliers = [];
+
+            for (var i = 0; i < resultItems.length; i++) {
+                var text = resultItems[i].textContent.trim();
+                if (text.endsWith('x')) {
+                    var value = parseFloat(text.replace('x', ''));
+                    if (!isNaN(value)) {
+                        multipliers.push(value);
+                    }
+                }
+            }
+
+            // Return in reverse order (oldest to newest)
+            return multipliers.reverse();
+            """
+
+            multipliers = self.driver.execute_script(script)
+
+            if multipliers:
+                self.log(f"Read {len(multipliers)} recent multipliers from page")
+                self.log(f"  Range: {min(multipliers):.2f}x to {max(multipliers):.2f}x")
+                return multipliers
+            else:
+                self.log("No multipliers found on page")
+                return []
+
+        except Exception as e:
+            self.log(f"Error reading multipliers from page: {e}")
+            return []
+
+    def find_session_in_recent_multipliers(
+        self, recent_page: List[float], min_consecutive: int = 5
+    ) -> Optional[Tuple[int, int, List[float]]]:
+        """
+        Try to find last session's data in recent multipliers from page
+
+        Args:
+            recent_page: Recent multipliers from page (oldest to newest)
+            min_consecutive: Minimum consecutive matches required
+
+        Returns:
+            (session_id, match_position, missing_multipliers) or None
+            match_position is the index in recent_page where the match was found
+        """
+        last_session = self.db.session_manager.get_last_session()
+
+        if not last_session:
+            self.log("No previous session found in database")
+            return None
+
+        session_id, last_timestamp, round_count = last_session
+
+        self.log(f"Found session #{session_id} with {round_count} rounds")
+        self.log(f"  Last timestamp: {last_timestamp}")
+
+        if round_count == 0:
+            self.log(f"Last session #{session_id} is empty, will continue it")
+            return (session_id, 0, recent_page)
+
+        self.log(f"Searching for session #{session_id} in recent multipliers...")
+
+        # Try different pattern lengths, starting from longest
+        max_pattern = min(round_count, 20)
+        self.log(
+            f"  Will try pattern lengths from {max_pattern} down to {min_consecutive}"
+        )
+
+        for pattern_length in range(max_pattern, min_consecutive - 1, -1):
+            db_pattern = self.db.session_manager.get_last_n_multipliers_from_session(
+                session_id, pattern_length
+            )
+
+            if not db_pattern:
+                continue
+
+            self.log(
+                f"  Trying pattern of {pattern_length} rounds: {db_pattern[:3]}...{db_pattern[-3:] if len(db_pattern) > 3 else ''}"
+            )
+
+            # Search for this pattern in recent_page
+            for i in range(len(recent_page) - pattern_length + 1):
+                page_slice = recent_page[i : i + pattern_length]
+
+                # Check if patterns match (with small tolerance for floating point)
+                matches = [abs(a - b) < 0.01 for a, b in zip(db_pattern, page_slice)]
+
+                if all(matches):
+                    # Found match!
+                    match_end_pos = i + pattern_length
+                    missing_rounds = recent_page[match_end_pos:]
+
+                    self.log(f"✓ Found session match!")
+                    self.log(f"  Pattern length: {pattern_length} rounds")
+                    self.log(f"  Match position: {i} to {match_end_pos - 1}")
+                    self.log(f"  DB pattern: {db_pattern[:5]}...")
+                    self.log(f"  Page match: {page_slice[:5]}...")
+                    self.log(f"  Missing rounds: {len(missing_rounds)}")
+
+                    if missing_rounds:
+                        self.log(
+                            f"  Missing range: {min(missing_rounds):.2f}x to {max(missing_rounds):.2f}x"
+                        )
+
+                    return (session_id, match_end_pos, missing_rounds)
+
+                # Debug: Show why first attempt didn't match
+                if i == 0 and pattern_length == max_pattern:
+                    mismatches = [
+                        (a, b)
+                        for a, b, m in zip(db_pattern, page_slice, matches)
+                        if not m
+                    ]
+                    if mismatches:
+                        self.log(
+                            f"    No match at position 0 (mismatches: {mismatches[:3]})"
+                        )
+
+        self.log(f"Could not find session #{session_id} in recent multipliers")
+        self.log(f"  DB last rounds: {db_pattern[:10] if db_pattern else []}")
+        self.log(f"  Page first rounds: {recent_page[:10]}")
+        return None
+
+    def recover_or_create_session(self, start_balance: Optional[float] = None):
+        """
+        Attempt to recover last session or create new one
+        """
+        self.log("=" * 60)
+        self.log("SESSION RECOVERY")
+        self.log("=" * 60)
+
+        # Read recent multipliers from page
+        recent_page = self.read_recent_multipliers_from_page()
+
+        if not recent_page:
+            self.log("⚠️  No recent multipliers on page, creating new session")
+            self.db.current_session_id = self.db.session_manager.create_session(
+                start_balance
+            )
+            self.log(f"✓ Created new session #{self.db.current_session_id}")
+            return
+
+        # Try to find last session
+        match_result = self.find_session_in_recent_multipliers(recent_page)
+
+        if match_result:
+            session_id, match_pos, missing_rounds = match_result
+
+            # Continue existing session
+            self.db.current_session_id = session_id
+            self.log(f"✓ Continuing session #{session_id}")
+
+            if missing_rounds:
+                self.log(f"Adding {len(missing_rounds)} missing rounds to database...")
+
+                # Get last timestamp from session
+                last_session_info = self.db.session_manager.get_last_session()
+                if last_session_info and last_session_info[1]:
+                    last_db_time = datetime.fromisoformat(last_session_info[1])
+                else:
+                    # Fallback: estimate from now
+                    last_db_time = datetime.now() - timedelta(
+                        seconds=60 * len(missing_rounds)
+                    )
+
+                # Current time is now
+                current_time = datetime.now()
+
+                # Add missing rounds with estimated timestamps
+                self.db.session_manager.add_missing_rounds(
+                    session_id, missing_rounds, last_db_time, current_time
+                )
+
+                self.log(f"✓ Added {len(missing_rounds)} missing rounds")
+                self.log(f"  Time range: {last_db_time} to {current_time}")
+
+                # Set last seen to the most recent
+                if missing_rounds:
+                    self.last_seen_multiplier = missing_rounds[-1]
+            else:
+                self.log("✓ No missing rounds, database is up to date")
+
+                # Set last seen to most recent from page
+                if recent_page:
+                    self.last_seen_multiplier = recent_page[-1]
+        else:
+            # Create new session
+            self.db.current_session_id = self.db.session_manager.create_session(
+                start_balance
+            )
+            self.log(f"✓ Created new session #{self.db.current_session_id}")
+
+            # Optionally, import all recent rounds from page
+            import_all = self.config.get("import_recent_on_new_session", True)
+
+            if import_all and recent_page:
+                self.log(f"Importing {len(recent_page)} recent rounds from page...")
+
+                # Estimate timestamps (assume 30 seconds per round average)
+                current_time = datetime.now()
+                estimated_start = current_time - timedelta(
+                    seconds=30 * len(recent_page)
+                )
+
+                self.db.session_manager.add_missing_rounds(
+                    self.db.current_session_id,
+                    recent_page,
+                    estimated_start,
+                    current_time,
+                )
+
+                self.log(f"✓ Imported {len(recent_page)} rounds")
+
+                # Set last seen
+                self.last_seen_multiplier = recent_page[-1]
+
+        self.log("=" * 60)
 
     def init_driver(self) -> bool:
         """Initialize undetected Chrome driver"""
@@ -210,8 +645,6 @@ class MultiStrategyCrasherBot:
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--enable-webgl")
             options.add_argument("--disable-extensions")
-            options.add_argument("--disable-extensions-file-access-check")
-            options.add_argument("--disable-extensions-http-throttling")
 
             self.driver = uc.Chrome(
                 options=options, version_main=None, use_subprocess=True
@@ -301,7 +734,6 @@ class MultiStrategyCrasherBot:
                 self.log("ERROR: No iframes found!")
                 return False
 
-            # Find game iframe
             game_iframe = None
             for i, iframe in enumerate(iframes):
                 iframe_src = iframe.get_attribute("src")
@@ -317,7 +749,6 @@ class MultiStrategyCrasherBot:
             self.driver.switch_to.frame(game_iframe)
             time.sleep(5)
 
-            # Check for nested iframes
             nested_iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
             if len(nested_iframes) > 0:
                 self.driver.switch_to.frame(nested_iframes[0])
@@ -409,7 +840,6 @@ class MultiStrategyCrasherBot:
                     )
                     time.sleep(2)
 
-                # Click AUTO button
                 auto_script = """
                 try {
                     var panels = document.querySelectorAll('div[data-singlebetpart]');
@@ -439,7 +869,6 @@ class MultiStrategyCrasherBot:
 
                 time.sleep(0.2)
 
-                # Enable auto cashout toggle
                 toggle_script = """
                 try {
                     var panels = document.querySelectorAll('div[data-singlebetpart]');
@@ -456,7 +885,6 @@ class MultiStrategyCrasherBot:
                 self.driver.execute_script(toggle_script)
                 time.sleep(0.2)
 
-                # Set cashout value with scroll and proper wait
                 from selenium.webdriver.common.action_chains import ActionChains
                 from selenium.webdriver.common.keys import Keys
 
@@ -467,27 +895,22 @@ class MultiStrategyCrasherBot:
                     By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]'
                 )
 
-                # Scroll element into view
                 self.driver.execute_script(
                     "arguments[0].scrollIntoView({block: 'center'});", auto_input
                 )
                 time.sleep(0.1)
 
-                # Use ActionChains for more reliable interaction
                 actions = ActionChains(self.driver)
                 actions.move_to_element(auto_input).click().perform()
                 time.sleep(0.1)
 
-                # Clear existing value
                 for _ in range(5):
                     auto_input.send_keys(Keys.BACKSPACE)
                 time.sleep(0.1)
 
-                # Enter new value
                 auto_input.send_keys(str(strategy.auto_cashout))
                 time.sleep(0.1)
 
-                # Verify the value was set
                 final_value = auto_input.get_attribute("value")
 
                 if abs(float(final_value) - strategy.auto_cashout) < 0.01:
@@ -544,18 +967,56 @@ class MultiStrategyCrasherBot:
             return None
 
     def detect_current_multiplier(self) -> Optional[float]:
-        """Detect current/ended round multiplier"""
+        """Detect current/ended round multiplier - only returns when round has truly ended"""
         try:
             script = """
             var mainMult = document.querySelector('span.ZmRXV');
-            if (mainMult) {
-                var hasEnded = mainMult.className.includes('false');
-                return {text: mainMult.textContent.trim(), hasEnded: hasEnded};
+            if (!mainMult) {
+                return {found: false};
             }
-            return {found: false};
+
+            var text = mainMult.textContent.trim();
+            var classList = mainMult.className;
+
+            // Check if round has ended
+            // When round is active, the className typically contains 'true'
+            // When round has ended (crashed), it contains 'false'
+            var hasEnded = classList.includes('false');
+
+            // Additional check: look for "CRASHED" or similar indicators
+            var crashedElement = document.querySelector('span.sc-w0koce-1') ||
+                                 document.querySelector('[class*="crashed"]') ||
+                                 document.querySelector('[class*="Crashed"]');
+
+            // Also check if there's a "BETTING" or "WAITING" state indicator
+            var bettingActive = document.querySelector('button[data-testid="b-btn"]');
+            var isBetting = bettingActive && bettingActive.textContent.toLowerCase().includes('bet');
+
+            // Round has ended if:
+            // 1. hasEnded flag is true, AND
+            // 2. We're in betting state (can place bets for next round)
+            var roundEnded = hasEnded && isBetting;
+
+            return {
+                text: text,
+                hasEnded: roundEnded,
+                className: classList,
+                isBetting: isBetting,
+                debugInfo: {
+                    hasEndedFlag: hasEnded,
+                    canBet: isBetting,
+                    finalDecision: roundEnded
+                }
+            };
             """
 
             result = self.driver.execute_script(script)
+
+            if not result.get(
+                "found", True
+            ):  # Default to True if 'found' not in result
+                return None
+
             if not result.get("hasEnded"):
                 return None
 
@@ -569,14 +1030,14 @@ class MultiStrategyCrasherBot:
                     if 1.0 <= mult <= 10000.0:
                         return mult
             return None
-        except:
+        except Exception as e:
+            # Silently ignore errors during detection (common during transitions)
             return None
 
     def check_trigger(self, strategy: StrategyState) -> bool:
         """Check if trigger conditions are met for a strategy"""
         recent = self.db.get_recent_multipliers(strategy.trigger_count)
 
-        # Need EXACT count of multipliers to trigger (prevents false triggers on startup)
         if len(recent) != strategy.trigger_count:
             return False
 
@@ -667,7 +1128,6 @@ class MultiStrategyCrasherBot:
             self.log(f"STOP: Max loss reached ({abs(self.total_profit):.0f})")
             return False
 
-        # Check each strategy
         for name, strategy in self.strategies.items():
             if strategy.consecutive_losses >= strategy.max_consecutive_losses:
                 self.log(
@@ -681,7 +1141,7 @@ class MultiStrategyCrasherBot:
         """Main bot loop"""
         try:
             self.log("=" * 60)
-            self.log("MULTI-STRATEGY CRASHER BOT STARTING")
+            self.log("MULTI-STRATEGY CRASHER BOT - ENHANCED")
             self.log("=" * 60)
 
             if not self.init_driver():
@@ -693,7 +1153,14 @@ class MultiStrategyCrasherBot:
             if not self.navigate_to_game():
                 return
 
-            # Initial setup with first strategy's cashout (for session keep-alive)
+            # Get initial balance
+            time.sleep(2)
+            start_balance = self.get_bank_balance()
+
+            # Attempt session recovery
+            self.recover_or_create_session(start_balance)
+
+            # Initial setup
             first_strategy = list(self.strategies.values())[0]
             if not self.setup_auto_cashout(first_strategy):
                 self.log(f"WARNING: Could not setup initial auto cashout")
@@ -702,33 +1169,17 @@ class MultiStrategyCrasherBot:
             self.log("ACTIVE STRATEGIES:")
             for name, strategy in self.strategies.items():
                 self.log(f"  [{name}]")
-                self.log(f"    Base Bet: {strategy.base_bet}")
-                self.log(f"    Auto Cashout: {strategy.auto_cashout}x")
                 self.log(
                     f"    Trigger: {strategy.trigger_count} rounds under {strategy.trigger_threshold}x"
                 )
-                self.log(f"    Bet Multiplier: {strategy.bet_multiplier}x (after loss)")
-                self.log(
-                    f"    Max Consecutive Losses: {strategy.max_consecutive_losses}"
-                )
-            self.log(f"  Global Max Loss: {self.max_loss}")
-            self.log("=" * 60)
-            self.log("STRATEGY RULES:")
-            self.log("  - Only ONE strategy can bet at a time")
-            self.log("  - Active strategy has exclusive access to bank")
-            self.log(
-                "  - Other strategies monitor but don't bet until active one finishes"
-            )
-            self.log("  - Auto-cashout configured ONLY when placing bet")
-            self.log(
-                f"  - Need EXACT {max(s.trigger_count for s in self.strategies.values())} rounds before any triggers (prevents false triggers)"
-            )
+                self.log(f"    Cashout: {strategy.auto_cashout}x")
             self.log("=" * 60)
             self.log("BOT RUNNING - Monitoring multipliers...")
             self.log("=" * 60)
 
             self.running = True
-            active_strategy_name = None  # Track which strategy is currently active
+            active_strategy_name = None
+            last_logged_time = {}  # Track when each multiplier was last logged
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -737,14 +1188,39 @@ class MultiStrategyCrasherBot:
                 new_mult = self.detect_current_multiplier()
 
                 if new_mult and new_mult != self.last_seen_multiplier:
+                    # Additional safeguards to prevent duplicate logging
+                    current_time = time.time()
+
+                    # Safeguard 1: Minimum 3 seconds between rounds
+                    time_since_last_round = current_time - self.last_round_time
+                    if self.last_round_time > 0 and time_since_last_round < 3.0:
+                        # Too soon after last round - likely still detecting ongoing round
+                        time.sleep(0.1)
+                        continue
+
+                    # Safeguard 2: Don't log same multiplier value within 5 seconds
+                    mult_key = f"{new_mult:.2f}"
+
+                    if mult_key in last_logged_time:
+                        time_since_last = current_time - last_logged_time[mult_key]
+                        if time_since_last < 5.0:
+                            # Same multiplier seen within 5 seconds - likely ongoing round
+                            time.sleep(0.1)
+                            continue
+
+                    # Update tracking
+                    last_logged_time[mult_key] = current_time
                     self.last_seen_multiplier = new_mult
+                    self.last_round_time = current_time
                     self.rounds_since_setup += 1
 
-                    # Keep session alive every 20 rounds (use first strategy's cashout)
+                    # Clean up old entries from tracking dict (keep last 10)
+                    if len(last_logged_time) > 10:
+                        oldest_key = min(last_logged_time, key=last_logged_time.get)
+                        del last_logged_time[oldest_key]
+
                     if self.rounds_since_setup >= 20:
-                        self.log(
-                            "Keeping session active (resetting auto-cashout to first strategy)..."
-                        )
+                        self.log("Keeping session active...")
                         self.setup_auto_cashout(first_strategy)
                         self.rounds_since_setup = 0
 
@@ -760,38 +1236,25 @@ class MultiStrategyCrasherBot:
                     self.log(" | ".join(log_parts))
                     self.db.add_multiplier(new_mult, bettor_count)
 
-                    # Handle active strategy result first
                     if active_strategy_name:
                         active_strategy = self.strategies[active_strategy_name]
                         if active_strategy.waiting_for_result:
                             self.handle_result(active_strategy, new_mult)
 
-                            # If strategy finished (no longer waiting), clear active status
                             if not active_strategy.waiting_for_result:
-                                self.log(
-                                    f"[{active_strategy_name}] Strategy finished, releasing bank"
-                                )
+                                self.log(f"[{active_strategy_name}] Strategy finished")
                                 active_strategy_name = None
 
-                    # Only check for new triggers if NO strategy is currently active
                     if not active_strategy_name:
-                        # Check all strategies for triggers (in order)
                         for name, strategy in self.strategies.items():
                             if not strategy.waiting_for_result and self.check_trigger(
                                 strategy
                             ):
-                                # This strategy triggered!
-                                self.log(
-                                    f"[{name}] Strategy ACTIVATED - Taking exclusive control of bank"
-                                )
+                                self.log(f"[{name}] Strategy ACTIVATED")
 
-                                # Setup auto-cashout specifically for THIS strategy
-                                self.log(
-                                    f"[{name}] Configuring auto-cashout to {strategy.auto_cashout}x..."
-                                )
                                 if not self.setup_auto_cashout(strategy):
                                     self.log(
-                                        f"[{name}] WARNING: Failed to setup auto-cashout, skipping bet"
+                                        f"[{name}] WARNING: Failed to setup auto-cashout"
                                     )
                                     continue
 
@@ -801,10 +1264,8 @@ class MultiStrategyCrasherBot:
                                 if self.place_bet(strategy, bet_amount):
                                     strategy.current_bet = bet_amount
                                     strategy.waiting_for_result = True
-                                    active_strategy_name = (
-                                        name  # Mark this strategy as active
-                                    )
-                                    break  # Only activate ONE strategy per round
+                                    active_strategy_name = name
+                                    break
 
                 time.sleep(0.1)
 
@@ -817,8 +1278,17 @@ class MultiStrategyCrasherBot:
             self.log(traceback.format_exc())
         finally:
             self.running = False
+
+            # Close session
+            if self.db.current_session_id:
+                final_balance = self.get_bank_balance()
+                self.db.session_manager.update_session_end(
+                    self.db.current_session_id, final_balance
+                )
+
             self.log("=" * 60)
             self.log("SESSION SUMMARY:")
+            self.log(f"   Session ID: {self.db.current_session_id}")
             self.log(f"   Global Total Profit/Loss: {self.total_profit:.0f}")
 
             for name, strategy in self.strategies.items():
