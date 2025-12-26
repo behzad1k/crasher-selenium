@@ -26,13 +26,14 @@ group = None
 tmp_upload_dir = None
 
 # Logging
-errorlog = "/var/log/crasher_bot/error.log"
+errorlog = "/var/log/crasher/error.log"
 loglevel = "info"
-accesslog = "/var/log/crasher_bot/access.log"
+accesslog = "/var/log/crasher/access.log"
 access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
 
 # Process naming
 proc_name = "crasher_bot_server"
+
 
 # Server hooks
 def on_starting(server):
@@ -44,8 +45,10 @@ def on_starting(server):
     print(f"Binding to: {bind}")
     print("=" * 60)
 
+
 def when_ready(server):
     print("✓ Crasher Bot Server is ready to accept connections")
+
 
 def on_exit(server):
     print("✗ Crasher Bot Server shutting down")
