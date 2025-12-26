@@ -666,4 +666,14 @@ def main():
 
 if __name__ == "__main__":
     main()
-#  python3 import_logs.py crasher_bot\(2\).log --with-sessions --db ../crasher_data.db --show-sessions
+#  python3 import_logs.py crasher_bot\(4\).log --with-sessions --db ../crasher_data.db --show-sessions
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-21 07:11:38" AND timestamp <= "2025-12-21 07:15:14";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-23 01:18:05" AND timestamp <= "2025-12-23 01:18:29";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-24 04:41:56" AND timestamp <= "2025-12-24 04:43:06";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-23 18:56:01" AND timestamp <= "2025-12-23 18:56:20";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-24 03:37:55" AND timestamp <= "2025-12-24 03:38:48";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-24 03:49:28" AND timestamp <= "2025-12-24 03:49:55";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-24 12:06:05" AND timestamp <= "2025-12-24 12:06:37";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-22 16:46:04" AND timestamp <= "2025-12-22 16:46:41";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-23 16:44:50" AND timestamp <= "2025-12-23 16:45:20";
+# DELETE FROM multipliers WHERE timestamp >= "2025-12-18 14:17:52" AND timestamp <= "2025-12-18 14:18:17";
