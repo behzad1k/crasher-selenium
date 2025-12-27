@@ -1422,6 +1422,7 @@
                     }
 
                     container.innerHTML = data.multipliers
+                        .reverse()
                         .map((m) => {
                             const colorClass = getMultiplierClass(m.multiplier);
                             const betClass = getMultiplierBetClass(m.bet);
@@ -1566,6 +1567,7 @@
                     }
 
                     container.innerHTML = data.multipliers
+                        .reverse()
                         .map((m) => {
                             const colorClass = getMultiplierClass(m.multiplier);
                             const betClass = getMultiplierBetClass(m.bet);

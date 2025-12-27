@@ -3,3 +3,4 @@ crasher_bot_server.log
 crasher_data.db
 bot_config.json
 .venv
+chromedriver_cache/
