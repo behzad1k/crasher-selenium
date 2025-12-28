@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Flask Server for Crasher Bot GUI
-Provides REST API for bot control and data visualization with WebSocket support for real-time logs
+Flask Server for Crasher Bot GUI - Updated
+New features:
+- Manual strategy activation buttons
+- Live strategy reload without restart
+- Runtime strategy state display
 """
 
 import json
@@ -22,7 +25,7 @@ from flask_socketio import SocketIO, emit
 from crasher_bot import Database, MultiStrategyCrasherBot
 
 
-# Custom log handler to capture logs and send via WebSocket
+# Custom log handler
 class WebSocketLogHandler(logging.Handler):
     """Custom handler that sends logs via WebSocket"""
 
@@ -39,16 +42,13 @@ class WebSocketLogHandler(logging.Handler):
                 "message": self.format(record),
             }
 
-            # Add to queue for buffer
             try:
                 self.log_queue.put_nowait(log_entry)
             except:
                 pass
 
-            # Send via WebSocket
             self.socketio.emit("log_message", log_entry, namespace="/")
         except Exception as e:
-            # Don't let logging errors break the app
             pass
 
 
@@ -69,18 +69,15 @@ app.config["SECRET_KEY"] = "crasher-bot-secret-key-change-in-production"
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Add WebSocket handler to logger
+# Add WebSocket handler
 ws_handler = WebSocketLogHandler(socketio)
 ws_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(ws_handler)
 
-# Also add it to the bot's logger
 bot_logger = logging.getLogger("crasher_bot")
 bot_logger.addHandler(ws_handler)
 
-# Global bot instance
-bot_instance: Optional[MultiStrategyCrasherBot] = None
-bot_thread: Optional[threading.Thread] = None
+# Bot status
 bot_status = {
     "running": False,
     "current_session_id": None,
@@ -132,7 +129,6 @@ class BotController:
             self.thread = threading.Thread(target=run_bot, daemon=True)
             self.thread.start()
 
-            # Wait a moment to check if bot started successfully
             time.sleep(2)
 
             logger.info("Bot start command completed")
@@ -157,7 +153,6 @@ class BotController:
                 self.bot.running = False
                 self.should_stop = True
 
-            # Wait for thread to finish (with timeout)
             if self.thread:
                 self.thread.join(timeout=10)
 
@@ -183,7 +178,6 @@ class BotController:
             status["current_session_id"] = self.bot.db.current_session_id
             status["total_profit"] = self.bot.total_profit
 
-            # Get strategy states
             strategy_states = {}
             for name, strategy in self.bot.strategies.items():
                 strategy_states[name] = {
@@ -192,6 +186,7 @@ class BotController:
                     "consecutive_losses": strategy.consecutive_losses,
                     "current_bet": strategy.current_bet,
                     "total_profit": strategy.total_profit,
+                    "manual_trigger": strategy.manual_trigger,
                 }
             status["strategies"] = strategy_states
 
@@ -211,11 +206,8 @@ bot_controller = BotController()
 def handle_connect():
     """Handle client connection"""
     logger.info(f"Client connected: {request.sid}")
-
-    # Send current bot status
     emit("bot_status", bot_controller.get_status())
 
-    # Send recent logs from buffer
     recent_logs = []
     try:
         while len(recent_logs) < 100:
@@ -245,7 +237,6 @@ def handle_request_logs(data):
         while len(temp_logs) < count:
             log_entry = ws_handler.log_queue.get_nowait()
             temp_logs.append(log_entry)
-        # Put them back
         for log in temp_logs:
             ws_handler.log_queue.put_nowait(log)
         recent_logs = temp_logs
@@ -288,13 +279,61 @@ def get_bot_status():
 
 @app.route("/api/strategies", methods=["GET"])
 def get_strategies():
-    """Get all strategies from config"""
+    """Get all strategies from config with current state"""
     try:
         with open("./bot_config.json", "r") as f:
             config = json.load(f)
-        return jsonify({"success": True, "strategies": config.get("strategies", [])})
+
+        strategies = config.get("strategies", [])
+
+        # Add runtime state if bot is running
+        if bot_controller.bot and bot_controller.is_running():
+            for strategy in strategies:
+                name = strategy["name"]
+                if name in bot_controller.bot.strategies:
+                    runtime = bot_controller.bot.strategies[name]
+                    strategy["runtime_state"] = {
+                        "is_active": runtime.is_active,
+                        "waiting_for_result": runtime.waiting_for_result,
+                        "consecutive_losses": runtime.consecutive_losses,
+                        "current_bet": runtime.current_bet,
+                        "total_profit": runtime.total_profit,
+                        "manual_trigger": runtime.manual_trigger,
+                    }
+
+        return jsonify({"success": True, "strategies": strategies})
     except Exception as e:
         logger.error(f"Error loading strategies: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/strategies/<strategy_name>/activate", methods=["POST"])
+def activate_strategy(strategy_name):
+    """Manually activate a strategy (trigger immediately)"""
+    try:
+        if not bot_controller.is_running():
+            return jsonify({"success": False, "error": "Bot is not running"}), 400
+
+        if not bot_controller.bot:
+            return jsonify({"success": False, "error": "Bot not initialized"}), 500
+
+        success = bot_controller.bot.activate_strategy_manually(strategy_name)
+
+        if success:
+            logger.info(f"Strategy '{strategy_name}' manually activated via API")
+            return jsonify(
+                {
+                    "success": True,
+                    "message": f"Strategy '{strategy_name}' will activate on next round",
+                }
+            ), 200
+        else:
+            return jsonify(
+                {"success": False, "error": "Failed to activate strategy"}
+            ), 400
+
+    except Exception as e:
+        logger.error(f"Error activating strategy: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -304,7 +343,6 @@ def create_strategy():
     try:
         new_strategy = request.json
 
-        # Validate required fields
         required = [
             "name",
             "base_bet",
@@ -318,29 +356,26 @@ def create_strategy():
                     {"success": False, "error": f"Missing field: {field}"}
                 ), 400
 
-        # Load config
         with open("./bot_config.json", "r") as f:
             config = json.load(f)
 
-        # Check if strategy name already exists
         if any(s["name"] == new_strategy["name"] for s in config["strategies"]):
             return jsonify(
                 {"success": False, "error": "Strategy name already exists"}
             ), 400
 
-        # Add defaults
         new_strategy.setdefault("max_consecutive_losses", 100)
         new_strategy.setdefault("bet_multiplier", 2.0)
 
-        # Add strategy
         config["strategies"].append(new_strategy)
 
-        # Save config
         with open("./bot_config.json", "w") as f:
             json.dump(config, f, indent=2)
 
-        logger.info(f"Strategy created: {new_strategy['name']}")
-        return jsonify({"success": True, "message": "Strategy created"})
+        logger.info(f"Strategy created: {new_strategy['name']} (will auto-reload)")
+        return jsonify(
+            {"success": True, "message": "Strategy created (auto-reloading)"}
+        )
 
     except Exception as e:
         logger.error(f"Error creating strategy: {e}")
@@ -353,15 +388,12 @@ def update_strategy(strategy_name):
     try:
         updated_strategy = request.json
 
-        # Load config
         with open("./bot_config.json", "r") as f:
             config = json.load(f)
 
-        # Find and update strategy
         found = False
         for i, strategy in enumerate(config["strategies"]):
             if strategy["name"] == strategy_name:
-                # Keep the name, update other fields
                 updated_strategy["name"] = strategy_name
                 config["strategies"][i] = updated_strategy
                 found = True
@@ -370,12 +402,13 @@ def update_strategy(strategy_name):
         if not found:
             return jsonify({"success": False, "error": "Strategy not found"}), 404
 
-        # Save config
         with open("./bot_config.json", "w") as f:
             json.dump(config, f, indent=2)
 
-        logger.info(f"Strategy updated: {strategy_name}")
-        return jsonify({"success": True, "message": "Strategy updated"})
+        logger.info(f"Strategy updated: {strategy_name} (will auto-reload)")
+        return jsonify(
+            {"success": True, "message": "Strategy updated (auto-reloading)"}
+        )
 
     except Exception as e:
         logger.error(f"Error updating strategy: {e}")
@@ -386,11 +419,9 @@ def update_strategy(strategy_name):
 def delete_strategy(strategy_name):
     """Delete a strategy"""
     try:
-        # Load config
         with open("./bot_config.json", "r") as f:
             config = json.load(f)
 
-        # Filter out the strategy
         original_count = len(config["strategies"])
         config["strategies"] = [
             s for s in config["strategies"] if s["name"] != strategy_name
@@ -399,12 +430,13 @@ def delete_strategy(strategy_name):
         if len(config["strategies"]) == original_count:
             return jsonify({"success": False, "error": "Strategy not found"}), 404
 
-        # Save config
         with open("./bot_config.json", "w") as f:
             json.dump(config, f, indent=2)
 
-        logger.info(f"Strategy deleted: {strategy_name}")
-        return jsonify({"success": True, "message": "Strategy deleted"})
+        logger.info(f"Strategy deleted: {strategy_name} (will auto-reload)")
+        return jsonify(
+            {"success": True, "message": "Strategy deleted (auto-reloading)"}
+        )
 
     except Exception as e:
         logger.error(f"Error deleting strategy: {e}")
@@ -427,7 +459,6 @@ def get_recent_multipliers():
         if bot_controller.bot and bot_controller.bot.db.current_session_id:
             session_id = bot_controller.bot.db.current_session_id
         else:
-            # Get last session
             cursor = db.conn.cursor()
             cursor.execute("SELECT id FROM sessions ORDER BY id DESC LIMIT 1")
             result = cursor.fetchone()
@@ -470,7 +501,6 @@ def get_recent_multipliers():
                 }
             )
 
-        # Reverse to get chronological order
         multipliers.reverse()
 
         db.close()
@@ -510,7 +540,7 @@ def get_sessions():
                     "end_timestamp": row[2],
                     "start_balance": row[3],
                     "end_balance": row[4],
-                    "total_rounds": row[6],  # Use actual count
+                    "total_rounds": row[6],
                     "profit_loss": (row[4] - row[3]) if (row[3] and row[4]) else None,
                 }
             )
@@ -583,7 +613,6 @@ def get_current_session_bets():
         if bot_controller.bot and bot_controller.bot.db.current_session_id:
             session_id = bot_controller.bot.db.current_session_id
         else:
-            # Get last session
             cursor = db.conn.cursor()
             cursor.execute("SELECT id FROM sessions ORDER BY id DESC LIMIT 1")
             result = cursor.fetchone()
@@ -658,15 +687,13 @@ def main():
     logger.info("=" * 60)
     logger.info("CRASHER BOT SERVER STARTING")
     logger.info("=" * 60)
-    logger.info(f"Starting Crasher Bot Server on port {port}")
-    logger.info(f"Dashboard available at http://localhost:{port}")
-    logger.info(f"WebSocket support enabled for real-time logs")
+    logger.info(f"Port: {port}")
+    logger.info(f"Dashboard: http://localhost:{port}")
+    logger.info(f"Features: Live reload, Manual activation, WebSocket logs")
     logger.info("=" * 60)
 
-    # Create static directory if it doesn't exist
     os.makedirs("static", exist_ok=True)
 
-    # Run with SocketIO
     socketio.run(
         app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True
     )
