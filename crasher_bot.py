@@ -372,6 +372,9 @@ class MultiStrategyCrasherBot:
         self.auto_cashout_configured = {}
         self.rounds_since_setup = 0
         self.total_profit = 0.0
+        self.strategy_active = (
+            False  # Flag to prevent multiple strategies from running simultaneously
+        )
 
     def _load_strategies(self):
         """Load all strategies from config"""
@@ -1108,6 +1111,7 @@ class MultiStrategyCrasherBot:
             )
 
             strategy.reset()
+            self.strategy_active = False  # Strategy finished, allow others to activate
         else:
             loss = strategy.current_bet
             strategy.total_profit -= loss
@@ -1250,16 +1254,21 @@ class MultiStrategyCrasherBot:
                                 self.log(f"[{active_strategy_name}] Strategy finished")
                                 active_strategy_name = None
 
-                    if not active_strategy_name:
+                    # Only check for new strategy activation if no strategy is currently active
+                    if not active_strategy_name and not self.strategy_active:
                         for name, strategy in self.strategies.items():
                             if not strategy.waiting_for_result and self.check_trigger(
                                 strategy
                             ):
                                 self.log(f"[{name}] Strategy ACTIVATED")
+                                self.strategy_active = True  # Lock out other strategies
 
                                 if not self.setup_auto_cashout(strategy):
                                     self.log(
                                         f"[{name}] WARNING: Failed to setup auto-cashout"
+                                    )
+                                    self.strategy_active = (
+                                        False  # Release lock on failure
                                     )
                                     continue
 
@@ -1271,6 +1280,10 @@ class MultiStrategyCrasherBot:
                                     strategy.waiting_for_result = True
                                     active_strategy_name = name
                                     break
+                                else:
+                                    self.strategy_active = (
+                                        False  # Release lock on failure
+                                    )
 
                 time.sleep(0.1)
 
