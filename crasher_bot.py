@@ -2,6 +2,7 @@
 """
 Crasher Bot - Enhanced with Session Recovery
 Reads recent multipliers from page and matches with database to continue sessions
+FIXED: Proper handling of consecutive losses - strategy stays active until win
 """
 
 import json
@@ -59,6 +60,7 @@ class StrategyState:
         self.current_bet = self.base_bet
         self.consecutive_losses = 0
         self.waiting_for_result = False
+        self.is_active = False
 
     def calc_next_bet(self) -> float:
         """Calculate next bet using custom multiplier"""
@@ -1097,8 +1099,9 @@ class MultiStrategyCrasherBot:
             return False
 
     def handle_result(self, strategy: StrategyState, multiplier: float):
-        """Handle bet result for a strategy"""
+        """Handle bet result for a strategy - FIXED to continue betting after losses"""
         if multiplier >= strategy.auto_cashout:
+            # WIN - reset and deactivate strategy
             profit = strategy.current_bet * (strategy.auto_cashout - 1)
             strategy.total_profit += profit
             self.total_profit += profit
@@ -1110,9 +1113,12 @@ class MultiStrategyCrasherBot:
                 f"[{strategy.name}] ✓ WIN! {multiplier}x | Profit: +{profit:.0f} | Strategy Total: {strategy.total_profit:.0f} | Global Total: {self.total_profit:.0f}"
             )
 
+            # Reset strategy completely
             strategy.reset()
-            self.strategy_active = False  # Strategy finished, allow others to activate
+            self.strategy_active = False  # Allow other strategies to activate
+
         else:
+            # LOSS - keep strategy active and prepare next bet
             loss = strategy.current_bet
             strategy.total_profit -= loss
             self.total_profit -= loss
@@ -1129,6 +1135,12 @@ class MultiStrategyCrasherBot:
                 f"[{strategy.name}]    Consecutive losses: {strategy.consecutive_losses} | Next bet: {strategy.current_bet:.0f}"
             )
 
+            # CRITICAL: Keep strategy active after loss
+            # Do NOT reset strategy_active flag
+            # Do NOT reset is_active flag
+            # Strategy will continue betting on next round
+
+        # Always set waiting_for_result to False after processing result
         strategy.waiting_for_result = False
 
     def check_stop_conditions(self) -> bool:
@@ -1147,7 +1159,7 @@ class MultiStrategyCrasherBot:
         return True
 
     def run(self):
-        """Main bot loop"""
+        """Main bot loop - FIXED to place consecutive bets after losses"""
         try:
             self.log("=" * 60)
             self.log("MULTI-STRATEGY CRASHER BOT - ENHANCED")
@@ -1245,31 +1257,55 @@ class MultiStrategyCrasherBot:
                     self.log(" | ".join(log_parts))
                     self.db.add_multiplier(new_mult, bettor_count)
 
+                    # CRITICAL: Handle result for active strategy
                     if active_strategy_name:
                         active_strategy = self.strategies[active_strategy_name]
                         if active_strategy.waiting_for_result:
                             self.handle_result(active_strategy, new_mult)
 
-                            if not active_strategy.waiting_for_result:
-                                self.log(f"[{active_strategy_name}] Strategy finished")
+                            # After handling result, check if strategy is still active
+                            # (it will be if it was a loss, won't be if it was a win)
+                            if not active_strategy.is_active:
+                                # Strategy won and reset - clear active strategy
+                                self.log(
+                                    f"[{active_strategy_name}] Strategy completed (won)"
+                                )
                                 active_strategy_name = None
+                                self.strategy_active = False
+                            else:
+                                # Strategy lost and is still active - place next bet immediately
+                                self.log(
+                                    f"[{active_strategy_name}] Placing next bet after loss..."
+                                )
+                                time.sleep(1)  # Brief pause before next bet
 
-                    # Only check for new strategy activation if no strategy is currently active
+                                bet_amount = active_strategy.current_bet
+
+                                if self.place_bet(active_strategy, bet_amount):
+                                    active_strategy.waiting_for_result = True
+                                else:
+                                    self.log(
+                                        f"[{active_strategy_name}] ERROR: Failed to place next bet"
+                                    )
+                                    # Strategy failed to bet - deactivate it
+                                    active_strategy.reset()
+                                    active_strategy_name = None
+                                    self.strategy_active = False
+
+                    # Only check for NEW strategy activation if no strategy is currently active
                     if not active_strategy_name and not self.strategy_active:
                         for name, strategy in self.strategies.items():
-                            if not strategy.waiting_for_result and self.check_trigger(
-                                strategy
-                            ):
+                            if not strategy.is_active and self.check_trigger(strategy):
                                 self.log(f"[{name}] Strategy ACTIVATED")
                                 self.strategy_active = True  # Lock out other strategies
+                                strategy.is_active = True
 
                                 if not self.setup_auto_cashout(strategy):
                                     self.log(
                                         f"[{name}] WARNING: Failed to setup auto-cashout"
                                     )
-                                    self.strategy_active = (
-                                        False  # Release lock on failure
-                                    )
+                                    self.strategy_active = False
+                                    strategy.is_active = False
                                     continue
 
                                 time.sleep(2)
@@ -1281,9 +1317,8 @@ class MultiStrategyCrasherBot:
                                     active_strategy_name = name
                                     break
                                 else:
-                                    self.strategy_active = (
-                                        False  # Release lock on failure
-                                    )
+                                    self.strategy_active = False
+                                    strategy.is_active = False
 
                 time.sleep(0.1)
 
