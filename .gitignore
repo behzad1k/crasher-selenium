@@ -1,8 +1,9 @@
-crasher_bot_inverse.log
-crasher_bot.log
-crasher_bot_server.log
-crasher_data.db
+*.db
+*.log
+*.csv
 bot_config.json
+bot_config_classic.json
 .venv
 chromedriver_cache/
 crasher_data_inverse.db
+import-data/crasher_bot

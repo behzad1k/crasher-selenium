@@ -1,0 +1,36 @@
+{
+  "game_url": "https://your-game-url-here.com",
+  "max_rounds": 0,
+  "strategies": [
+    {
+      "name": "Reverse_2x_Optimal",
+      "threshold": 2.0,
+      "trigger_count": 3,
+      "base_bet": 1000,
+      "bet_multiplier": 1.5,
+      "auto_cashout": 2.0,
+      "max_consecutive_losses": 7,
+      "enabled": true
+    },
+    {
+      "name": "Reverse_2x_Conservative",
+      "threshold": 2.0,
+      "trigger_count": 4,
+      "base_bet": 1000,
+      "bet_multiplier": 1.5,
+      "auto_cashout": 2.0,
+      "max_consecutive_losses": 7,
+      "enabled": false
+    },
+    {
+      "name": "Reverse_2_5x_Strategy",
+      "threshold": 2.5,
+      "trigger_count": 3,
+      "base_bet": 1000,
+      "bet_multiplier": 1.5,
+      "auto_cashout": 2.0,
+      "max_consecutive_losses": 6,
+      "enabled": false
+    }
+  ]
+}
