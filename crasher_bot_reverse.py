@@ -1046,7 +1046,7 @@ class ClassicMartingaleBot:
         return True
 
     def run(self):
-        """Main bot loop"""
+        """Main bot loop - FIXED duplicate detection"""
         try:
             self.log("=" * 60)
             self.log("CLASSIC MARTINGALE CRASHER BOT")
@@ -1086,7 +1086,9 @@ class ClassicMartingaleBot:
             self.log("=" * 60)
 
             self.running = True
-            last_logged_time = {}
+            last_detection_time = (
+                0  # CHANGED: Use timestamp instead of multiplier value
+            )
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -1094,32 +1096,23 @@ class ClassicMartingaleBot:
 
                 new_mult = self.detect_current_multiplier()
 
-                if new_mult and new_mult != self.last_seen_multiplier:
+                # FIXED: Check based on timing, not multiplier value
+                if new_mult is not None:
                     current_time = time.time()
 
-                    # Safeguards against duplicate logging
-                    time_since_last_round = current_time - self.last_round_time
-                    if self.last_round_time > 0 and time_since_last_round < 3.0:
+                    # NEW LOGIC: Minimum 3 seconds between rounds
+                    time_since_last = current_time - last_detection_time
+
+                    if last_detection_time > 0 and time_since_last < 3.0:
+                        # Too soon - this is likely the same round
                         time.sleep(0.1)
                         continue
 
-                    mult_key = f"{new_mult:.2f}"
-                    if mult_key in last_logged_time:
-                        time_since_last = current_time - last_logged_time[mult_key]
-                        if time_since_last < 5.0:
-                            time.sleep(0.1)
-                            continue
-
-                    # Update tracking
-                    last_logged_time[mult_key] = current_time
+                    # This is a new round!
+                    last_detection_time = current_time
                     self.last_seen_multiplier = new_mult
                     self.last_round_time = current_time
                     self.rounds_since_setup += 1
-
-                    # Clean up tracking dict
-                    if len(last_logged_time) > 10:
-                        oldest_key = min(last_logged_time, key=last_logged_time.get)
-                        del last_logged_time[oldest_key]
 
                     # Keep session active
                     if self.rounds_since_setup >= 20:

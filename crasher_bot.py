@@ -1159,7 +1159,7 @@ class MultiStrategyCrasherBot:
         return True
 
     def run(self):
-        """Main bot loop - FIXED to place consecutive bets after losses"""
+        """Main bot loop - FIXED duplicate detection"""
         try:
             self.log("=" * 60)
             self.log("MULTI-STRATEGY CRASHER BOT - ENHANCED")
@@ -1200,7 +1200,9 @@ class MultiStrategyCrasherBot:
 
             self.running = True
             active_strategy_name = None
-            last_logged_time = {}  # Track when each multiplier was last logged
+            last_detection_time = (
+                0  # CHANGED: Use timestamp instead of multiplier value
+            )
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -1208,37 +1210,25 @@ class MultiStrategyCrasherBot:
 
                 new_mult = self.detect_current_multiplier()
 
-                if new_mult and new_mult != self.last_seen_multiplier:
-                    # Additional safeguards to prevent duplicate logging
+                # FIXED: Check based on timing, not multiplier value
+                if new_mult is not None:
                     current_time = time.time()
 
-                    # Safeguard 1: Minimum 3 seconds between rounds
-                    time_since_last_round = current_time - self.last_round_time
-                    if self.last_round_time > 0 and time_since_last_round < 3.0:
-                        # Too soon after last round - likely still detecting ongoing round
+                    # NEW LOGIC: Minimum 3 seconds between rounds (prevents duplicates)
+                    time_since_last = current_time - last_detection_time
+
+                    if last_detection_time > 0 and time_since_last < 3.0:
+                        # Too soon - this is likely the same round still being detected
                         time.sleep(0.1)
                         continue
 
-                    # Safeguard 2: Don't log same multiplier value within 5 seconds
-                    mult_key = f"{new_mult:.2f}"
-
-                    if mult_key in last_logged_time:
-                        time_since_last = current_time - last_logged_time[mult_key]
-                        if time_since_last < 5.0:
-                            # Same multiplier seen within 5 seconds - likely ongoing round
-                            time.sleep(0.1)
-                            continue
-
-                    # Update tracking
-                    last_logged_time[mult_key] = current_time
-                    self.last_seen_multiplier = new_mult
+                    # This is a new round!
+                    last_detection_time = current_time
+                    self.last_seen_multiplier = (
+                        new_mult  # Still update for session recovery
+                    )
                     self.last_round_time = current_time
                     self.rounds_since_setup += 1
-
-                    # Clean up old entries from tracking dict (keep last 10)
-                    if len(last_logged_time) > 10:
-                        oldest_key = min(last_logged_time, key=last_logged_time.get)
-                        del last_logged_time[oldest_key]
 
                     if self.rounds_since_setup >= 20:
                         self.log("Keeping session active...")
@@ -1264,9 +1254,7 @@ class MultiStrategyCrasherBot:
                             self.handle_result(active_strategy, new_mult)
 
                             # After handling result, check if strategy is still active
-                            # (it will be if it was a loss, won't be if it was a win)
                             if not active_strategy.is_active:
-                                # Strategy won and reset - clear active strategy
                                 self.log(
                                     f"[{active_strategy_name}] Strategy completed (won)"
                                 )
@@ -1277,7 +1265,7 @@ class MultiStrategyCrasherBot:
                                 self.log(
                                     f"[{active_strategy_name}] Placing next bet after loss..."
                                 )
-                                time.sleep(1)  # Brief pause before next bet
+                                time.sleep(1)
 
                                 bet_amount = active_strategy.current_bet
 
@@ -1287,7 +1275,6 @@ class MultiStrategyCrasherBot:
                                     self.log(
                                         f"[{active_strategy_name}] ERROR: Failed to place next bet"
                                     )
-                                    # Strategy failed to bet - deactivate it
                                     active_strategy.reset()
                                     active_strategy_name = None
                                     self.strategy_active = False
@@ -1297,7 +1284,7 @@ class MultiStrategyCrasherBot:
                         for name, strategy in self.strategies.items():
                             if not strategy.is_active and self.check_trigger(strategy):
                                 self.log(f"[{name}] Strategy ACTIVATED")
-                                self.strategy_active = True  # Lock out other strategies
+                                self.strategy_active = True
                                 strategy.is_active = True
 
                                 if not self.setup_auto_cashout(strategy):
