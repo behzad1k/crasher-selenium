@@ -741,10 +741,10 @@ class ClassicMartingaleBot:
             try:
                 if retry_attempt > 0:
                     self.log(f"  Retry attempt {retry_attempt + 1}/{max_retries}")
-                    time.sleep(3)  # Wait longer between retries
+                    time.sleep(2)  # Wait longer between retries
 
                 # Wait for betting panel to be stable and interactable
-                time.sleep(1)
+                time.sleep(0.5)
 
                 # Find the first betting panel
                 panels = self.driver.find_elements(
@@ -852,26 +852,14 @@ class ClassicMartingaleBot:
                 actions.move_to_element(auto_input).click().perform()
                 time.sleep(0.2)
 
-                # Select all and delete
-                actions.key_down(Keys.CONTROL).send_keys("a").key_up(
-                    Keys.CONTROL
-                ).perform()
-                time.sleep(0.1)
-                actions.send_keys(Keys.DELETE).perform()
-                time.sleep(0.1)
-
-                # Alternative: use multiple backspaces to ensure it's cleared
-                for _ in range(10):
+                # Use multiple backspaces to ensure it's cleared
+                for _ in range(4):
                     actions.send_keys(Keys.BACKSPACE).perform()
                     time.sleep(0.05)
 
                 # Enter new value
                 actions.send_keys(str(self.strategy.auto_cashout)).perform()
                 time.sleep(0.2)
-
-                # Press Enter or Tab to confirm the value
-                actions.send_keys(Keys.TAB).perform()
-                time.sleep(0.3)
 
                 # Step 6: Verify the value was set correctly
                 final_value = auto_input.get_attribute("value")
@@ -1241,7 +1229,7 @@ class ClassicMartingaleBot:
                                 self.log(f"⚠️ WARNING: Failed to setup auto-cashout")
                                 continue
 
-                            time.sleep(2)
+                            time.sleep(0.5)
                             bet_amount = self.strategy.calc_current_bet()
 
                             if self.place_bet(bet_amount):
