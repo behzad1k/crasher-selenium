@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Crasher Bot - Classic Martingale Strategy
-Waits for N consecutive rounds >= threshold, then bets expecting to reach cashout target
-CRITICAL: Excludes rounds we've bet on from future trigger windows
+Crasher Bot - Classic Martingale Strategy (OPTIMIZED)
+Performance improvements for low-resource servers
 """
 
 import json
@@ -46,18 +45,17 @@ class StrategyState:
     name: str
     base_bet: float
     auto_cashout: float
-    threshold: float  # We wait for rounds >= this
+    threshold: float
     trigger_count: int
     max_consecutive_losses: int
     bet_multiplier: float
 
-    # Runtime state
     current_bet: float
-    consecutive_losses: int  # Track losses for martingale progression
+    consecutive_losses: int
     total_profit: float
     waiting_for_result: bool
     is_active: bool
-    excluded_round_ids: Set[int] = field(default_factory=set)  # Round IDs we've bet on
+    excluded_round_ids: Set[int] = field(default_factory=set)
 
     def reset_after_win(self):
         """Reset after a win"""
@@ -103,7 +101,6 @@ class SessionManager:
             )
         """)
 
-        # Check if multipliers table has session_id column
         cursor.execute("PRAGMA table_info(multipliers)")
         columns = [col[1] for col in cursor.fetchall()]
 
@@ -353,7 +350,7 @@ class Database:
 
 
 class ClassicMartingaleBot:
-    """Crasher bot with classic martingale strategy"""
+    """Crasher bot with classic martingale strategy (OPTIMIZED)"""
 
     def __init__(self, config_path: str = "./bot_config_classic.json"):
         with open(config_path, "r") as f:
@@ -364,10 +361,8 @@ class ClassicMartingaleBot:
         self.game_url = self.config["game_url"]
         self.max_loss = float(self.config.get("max_loss", 100000000))
 
-        # Load strategy
         self.strategy = self._load_strategy()
 
-        # Bot state
         self.driver = None
         self.wait = None
         self.db = Database()
@@ -378,6 +373,12 @@ class ClassicMartingaleBot:
         self.auto_cashout_configured = False
         self.rounds_since_setup = 0
         self.total_profit = 0.0
+
+        # OPTIMIZATION: Cache element references
+        self._cached_panel = None
+        self._cached_bet_input = None
+        self._cached_bet_button = None
+        self._cached_auto_input = None
 
     def _load_strategy(self) -> StrategyState:
         """Load strategy from config"""
@@ -558,7 +559,7 @@ class ClassicMartingaleBot:
         self.log("=" * 60)
 
     def init_driver(self) -> bool:
-        """Initialize undetected Chrome driver"""
+        """Initialize undetected Chrome driver with optimized settings"""
         try:
             if not UNDETECTED_AVAILABLE:
                 self.log("ERROR: undetected-chromedriver not installed!")
@@ -570,12 +571,39 @@ class ClassicMartingaleBot:
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
 
+            # OPTIMIZATION: Performance flags for low-resource servers
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument(
+                "--disable-gpu"
+            )  # Still allows WebGL but disables GPU process
+            options.add_argument("--disable-extensions")
+            options.add_argument("--disable-background-networking")
+            options.add_argument("--disable-sync")
+            options.add_argument("--disable-translate")
+            options.add_argument("--disable-features=TranslateUI")
+            options.add_argument("--disable-infobars")
+            options.add_argument("--disable-notifications")
+            options.add_argument("--disable-popup-blocking")
+            options.add_argument("--metrics-recording-only")
+            options.add_argument("--mute-audio")
+            options.add_argument("--no-first-run")
+            options.add_argument("--safebrowsing-disable-auto-update")
+            options.add_argument("--disable-breakpad")
+            options.add_argument("--disable-logging")
+
+            # Memory optimizations
+            options.add_argument("--js-flags=--max-old-space-size=512")
+
             self.driver = uc.Chrome(
                 options=options, version_main=None, use_subprocess=True
             )
             self.driver.set_page_load_timeout(60)
-            self.driver.implicitly_wait(10)
-            self.wait = WebDriverWait(self.driver, 30)
+
+            # OPTIMIZATION: Reduce implicit wait
+            self.driver.implicitly_wait(3)
+
+            # OPTIMIZATION: Shorter explicit wait timeout
+            self.wait = WebDriverWait(self.driver, 15)
 
             self.log("✓ Driver initialized")
             return True
@@ -588,7 +616,7 @@ class ClassicMartingaleBot:
         try:
             self.log("Navigating to login page...")
             self.driver.get("https://1000bet.in")
-            time.sleep(5)
+            time.sleep(3)  # Reduced from 5
 
             self.log("Clicking login button...")
             login_btn = self.wait.until(
@@ -597,7 +625,7 @@ class ClassicMartingaleBot:
                 )
             )
             login_btn.click()
-            time.sleep(2)
+            time.sleep(1)  # Reduced from 2
 
             self.log(f"Entering credentials...")
             email_input = self.wait.until(
@@ -609,23 +637,20 @@ class ClassicMartingaleBot:
                 By.CSS_SELECTOR, 'input[automation="password_input"]'
             )
 
+            # OPTIMIZATION: Direct send_keys instead of character-by-character
             email_input.clear()
-            for char in self.username:
-                email_input.send_keys(char)
-                time.sleep(0.05)
-            time.sleep(0.5)
+            email_input.send_keys(self.username)
+            time.sleep(0.2)
 
             password_input.clear()
-            for char in self.password:
-                password_input.send_keys(char)
-                time.sleep(0.05)
-            time.sleep(0.5)
+            password_input.send_keys(self.password)
+            time.sleep(0.2)
 
             submit_btn = self.driver.find_element(
                 By.CSS_SELECTOR, 'button[automation="login_button"]'
             )
             submit_btn.click()
-            time.sleep(5)
+            time.sleep(3)  # Reduced from 5
 
             self.log("✓ Login successful!")
             return True
@@ -639,9 +664,9 @@ class ClassicMartingaleBot:
         try:
             self.log(f"Loading game...")
             self.driver.get(self.game_url)
-            time.sleep(5)
+            time.sleep(3)  # Reduced from 5
 
-            WebDriverWait(self.driver, 20).until(
+            WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "iframe"))
             )
 
@@ -658,12 +683,12 @@ class ClassicMartingaleBot:
                 return False
 
             self.driver.switch_to.frame(game_iframe)
-            time.sleep(5)
+            time.sleep(3)  # Reduced from 5
 
             nested_iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
             if len(nested_iframes) > 0:
                 self.driver.switch_to.frame(nested_iframes[0])
-                time.sleep(3)
+                time.sleep(2)  # Reduced from 3
 
             self.wait_for_dynamic_content()
             self.close_tutorial_popup()
@@ -675,7 +700,7 @@ class ClassicMartingaleBot:
             self.log(f"Failed to load game: {e}")
             return False
 
-    def wait_for_dynamic_content(self, max_wait: int = 40):
+    def wait_for_dynamic_content(self, max_wait: int = 30):  # Reduced from 40
         """Wait for game elements"""
         try:
             start_time = time.time()
@@ -703,13 +728,13 @@ class ClassicMartingaleBot:
                         stable_count = 0
                     elif current_visible == last_visible_count and current_visible > 3:
                         stable_count += 1
-                        if stable_count >= 3:
-                            time.sleep(2)
+                        if stable_count >= 2:  # Reduced from 3
+                            time.sleep(1)  # Reduced from 2
                             return True
 
-                    time.sleep(1)
+                    time.sleep(0.5)  # Reduced from 1
                 except:
-                    time.sleep(1)
+                    time.sleep(0.5)
 
             return False
         except:
@@ -718,7 +743,7 @@ class ClassicMartingaleBot:
     def close_tutorial_popup(self):
         """Close tutorial popup if it appears"""
         try:
-            for attempt in range(30):
+            for attempt in range(20):  # Reduced from 30
                 script = """
                 var buttons = document.getElementsByClassName('Qthei');
                 if (buttons.length > 0) {
@@ -729,186 +754,112 @@ class ClassicMartingaleBot:
                 """
                 if self.driver.execute_script(script):
                     self.log("✓ Tutorial popup closed")
-                    time.sleep(2)
+                    time.sleep(1)  # Reduced from 2
                     return
-                time.sleep(1)
+                time.sleep(0.5)  # Reduced from 1
         except:
             pass
 
-    def setup_auto_cashout(self, max_retries: int = 5) -> bool:
-        """Setup auto cashout with robust timing and state handling"""
-        self.log(f" Auto Cashout started")
+    def setup_auto_cashout(self, max_retries: int = 3) -> bool:  # Reduced from 5
+        """OPTIMIZED: Setup auto cashout with minimal waits"""
 
         for retry_attempt in range(max_retries):
             try:
                 if retry_attempt > 0:
-                    self.log(f"  Retry attempt {retry_attempt + 1}/{max_retries}")
-                    time.sleep(2)  # Wait longer between retries
+                    time.sleep(1)  # Reduced from 2
 
-                # Find the first betting panel
-                panels = self.driver.find_elements(
-                    By.CSS_SELECTOR, "div[data-singlebetpart]"
-                )
-                self.log(f" Panel Found")
-                if not panels:
-                    raise Exception("Betting panel not found")
+                # Find the first betting panel (with caching)
+                if not self._cached_panel or retry_attempt > 0:
+                    panels = self.driver.find_elements(
+                        By.CSS_SELECTOR, "div[data-singlebetpart]"
+                    )
+                    if not panels:
+                        raise Exception("Betting panel not found")
+                    self._cached_panel = panels[0]
 
-                first_panel = panels[0]
+                first_panel = self._cached_panel
 
-                # Step 1: Check current mode and only click AUTO if needed
-                buttons = first_panel.find_elements(By.TAG_NAME, "button")
-                current_mode = None
-                auto_button = None
-                self.log(f" Buttons Found")
+                # Step 1: Check current mode - OPTIMIZED with single query
+                script = """
+                var panel = arguments[0];
+                var buttons = panel.querySelectorAll('button');
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    if (btn.offsetParent !== null) {
+                        var text = btn.textContent.trim().toLowerCase();
+                        if (text === 'auto' || text === 'stop') {
+                            return {mode: text, button: btn};
+                        }
+                    }
+                }
+                return null;
+                """
 
-                for btn in buttons:
-                    try:
-                        if btn.is_displayed() and btn.is_enabled():
-                            button_text = btn.text.strip().lower()
-                            if button_text in ["auto", "stop"]:
-                                current_mode = button_text
-                                auto_button = btn
-                                break
-                    except:
-                        continue
+                result = self.driver.execute_script(script, first_panel)
 
-                if not auto_button:
+                if not result:
                     raise Exception("AUTO/STOP button not found")
 
-                # Only click if we're NOT already in AUTO mode
+                current_mode = result["mode"]
+
+                # Only click if we need to switch to AUTO mode
                 if current_mode == "auto":
-                    self.log("  ✓ Switching to AUTO mode...")
-                    WebDriverWait(self.driver, 5).until(
-                        EC.element_to_be_clickable(auto_button)
+                    # Click directly via JavaScript for speed
+                    self.driver.execute_script(
+                        "arguments[0].click();", result["button"]
                     )
-                    self.log(f"Auto Button clicked")
+                    time.sleep(0.1)  # Minimal wait
 
-                    auto_button.click()
-                    time.sleep(0.2)
-                elif current_mode == "stop":
-                    self.log("  ✓ Already in AUTO mode")
-                else:
-                    raise Exception(f"Unexpected button state: {current_mode}")
+                # Step 2 & 3: Enable toggle and set value in ONE operation
+                script = """
+                var panel = arguments[0];
+                var targetValue = arguments[1];
 
-                # Step 2: Wait for auto cashout controls to appear
-                time.sleep(0.2)
+                // Find and enable toggle if needed
+                var toggle = panel.querySelector('input[data-testid="aut-co-tgl"]');
+                if (toggle && !toggle.checked) {
+                    var label = panel.querySelector('label[data-testid="toggle-label"][for="autocashout0"]');
+                    if (label) label.click();
+                }
 
-                # Step 3: Check and enable auto cashout toggle if needed
-                try:
-                    toggle = WebDriverWait(first_panel, 5).until(
-                        EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, 'input[data-testid="aut-co-tgl"]')
-                        )
-                    )
-                    self.log(f"Toggle Found")
+                // Set the input value directly
+                var input = panel.querySelector('input[data-testid="aut-co-inp"]');
+                if (input) {
+                    input.focus();
+                    input.value = '';
+                    input.value = targetValue;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.blur();
+                    return input.value;
+                }
+                return null;
+                """
 
-                    # Wait for toggle to be interactable
-                    time.sleep(0.2)
-
-                    # Check if toggle is already selected
-                    is_selected = toggle.is_selected()
-
-                    if not is_selected:
-                        # Click the label for better reliability
-                        toggle_label = first_panel.find_element(
-                            By.CSS_SELECTOR,
-                            'label[data-testid="toggle-label"][for="autocashout0"]',
-                        )
-                        self.log(f"Toggle Label Found")
-
-                        WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable(toggle_label)
-                        )
-                        toggle_label.click()
-                        self.log(f"Toggle Label Clicked")
-
-                        time.sleep(0.1)
-                        self.log("  ✓ Enabled auto cashout toggle")
-                    else:
-                        self.log("  ✓ Auto cashout toggle already enabled")
-
-                except Exception as e:
-                    self.log(f"  ⚠️ Toggle issue: {e}")
-                    # Continue anyway, might already be enabled
-
-                # Step 4: Wait for input to be ready and interactable
-                time.sleep(0.1)
-
-                # Step 5: Find and interact with auto cashout input using ActionChains
-                auto_input = WebDriverWait(first_panel, 5).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]')
-                    )
+                final_value = self.driver.execute_script(
+                    script, first_panel, str(self.strategy.auto_cashout)
                 )
 
-                self.log(f"Input Found")
+                time.sleep(0.1)  # Minimal wait for UI update
 
-                # Wait for it to be enabled and visible
-                for wait_attempt in range(10):
-                    self.log(f"Waiting for auto input")
+                if final_value:
+                    try:
+                        final_float = float(
+                            final_value.replace(",", ".").replace(" ", "")
+                        )
+                        if abs(final_float - self.strategy.auto_cashout) < 0.01:
+                            self.auto_cashout_configured = True
+                            return True
+                    except:
+                        pass
 
-                    if auto_input.is_displayed() and auto_input.is_enabled():
-                        break
-                    time.sleep(0.3)
-                else:
-                    raise Exception("Auto cashout input not interactable after waiting")
-
-                # Read current value
-                current_value = auto_input.get_attribute("value")
-                self.log(f"  Current auto cashout value: {current_value}")
-
-                # Use ActionChains to clear and set the value
-                actions = ActionChains(self.driver)
-
-                # Click the input to focus it
-                actions.move_to_element(auto_input).click().perform()
-                time.sleep(0.2)
-                self.log(f"Input clicked")
-
-                # Use multiple backspaces to ensure it's cleared
-                for _ in range(4):
-                    actions.send_keys(Keys.BACKSPACE).perform()
-                    time.sleep(0.05)
-
-                self.log(f"Deleted")
-
-                # Enter new value
-                actions.send_keys(str(self.strategy.auto_cashout)).perform()
-                time.sleep(0.2)
-                self.log(f"new inputed")
-
-                # Step 6: Verify the value was set correctly
-                final_value = auto_input.get_attribute("value")
-
-                # Try to parse the value (handle both "2.5" and "2,5" formats)
-                try:
-                    final_float = float(final_value.replace(",", ".").replace(" ", ""))
-                except:
-                    final_float = 0.0
-
-                self.log(f"  Final auto cashout value: {final_value}")
-
-                if abs(final_float - self.strategy.auto_cashout) < 0.01:
-                    self.log(f"✓ Auto cashout successfully set to {final_value}x")
-                    self.auto_cashout_configured = True
-                    return True
-                else:
-                    self.log(
-                        f"  ⚠️ Value mismatch: expected {self.strategy.auto_cashout}, got {final_value}"
-                    )
-                    if retry_attempt < max_retries - 1:
-                        self.log(f"  Retrying...")
-                        continue
-                    return False
-
-            except TimeoutException as e:
-                self.log(f"  ⚠️ Timeout on attempt {retry_attempt + 1}: {e}")
-                if retry_attempt == max_retries - 1:
-                    return False
+                if retry_attempt < max_retries - 1:
+                    continue
+                return False
 
             except Exception as e:
-                self.log(f"  ⚠️ Attempt {retry_attempt + 1} failed: {e}")
                 if retry_attempt == max_retries - 1:
+                    self.log(f"  ⚠️ Auto cashout setup failed: {e}")
                     return False
 
         return False
@@ -999,10 +950,7 @@ class ClassicMartingaleBot:
             return None
 
     def check_trigger(self) -> bool:
-        """
-        Check if trigger conditions are met
-        CRITICAL: Excludes rounds we've bet on from trigger windows
-        """
+        """Check if trigger conditions are met"""
         recent_with_ids = self.db.get_recent_multipliers_with_ids(
             self.strategy.trigger_count
         )
@@ -1010,15 +958,12 @@ class ClassicMartingaleBot:
         if len(recent_with_ids) != self.strategy.trigger_count:
             return False
 
-        # Extract multipliers and round IDs
         window_ids = [rid for rid, _ in recent_with_ids]
         window_mults = [mult for _, mult in recent_with_ids]
 
-        # CRITICAL CHECK: Skip if ANY round in this window has been bet on
         if any(rid in self.strategy.excluded_round_ids for rid in window_ids):
             return False
 
-        # Check if all rounds are >= threshold
         all_above = all(m >= self.strategy.threshold for m in window_mults)
 
         if all_above:
@@ -1031,45 +976,60 @@ class ClassicMartingaleBot:
         return False
 
     def place_bet(self, amount: float) -> bool:
-        """Place a bet"""
+        """OPTIMIZED: Place a bet with cached elements and minimal waits"""
         try:
-            from selenium.webdriver.common.keys import Keys
+            # Use cached panel or find it
+            if not self._cached_panel:
+                panels = self.driver.find_elements(
+                    By.CSS_SELECTOR, "div[data-singlebetpart]"
+                )
+                if not panels:
+                    return False
+                self._cached_panel = panels[0]
 
-            panels = self.driver.find_elements(
-                By.CSS_SELECTOR, "div[data-singlebetpart]"
+            # Use JavaScript to set bet and click button for maximum speed
+            script = """
+            var panel = arguments[0];
+            var amount = arguments[1];
+
+            var betInput = panel.querySelector('input[data-testid="bp-inp"]');
+            var betButton = panel.querySelector('button[data-testid="b-btn"]');
+
+            if (betInput && betButton) {
+                betInput.focus();
+                betInput.value = '';
+                betInput.value = amount;
+                betInput.dispatchEvent(new Event('input', { bubbles: true }));
+                betInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+                setTimeout(function() {
+                    betButton.click();
+                }, 50);
+
+                return true;
+            }
+            return false;
+            """
+
+            success = self.driver.execute_script(
+                script, self._cached_panel, str(int(amount))
             )
-            if not panels:
-                return False
 
-            bet_input = panels[0].find_element(
-                By.CSS_SELECTOR, 'input[data-testid="bp-inp"]'
-            )
-            bet_input.click()
-            time.sleep(0.1)
+            if success:
+                time.sleep(0.05)  # Minimal wait
+                self.log(f"[{self.strategy.name}] 💰 BET PLACED: ${amount:,.0f}")
+                return True
 
-            for _ in range(8):
-                bet_input.send_keys(Keys.BACKSPACE)
-            time.sleep(0.1)
-
-            bet_input.send_keys(str(int(amount)))
-            time.sleep(0.1)
-
-            bet_button = panels[0].find_element(
-                By.CSS_SELECTOR, 'button[data-testid="b-btn"]'
-            )
-            bet_button.click()
-            time.sleep(0.1)
-
-            self.log(f"[{self.strategy.name}] 💰 BET PLACED: ${amount:,.0f}")
-            return True
+            return False
 
         except Exception as e:
             self.log(f"[{self.strategy.name}] ❌ Failed to place bet: {e}")
+            # Clear cache on error
+            self._cached_panel = None
             return False
 
     def handle_result(self, multiplier: float, round_id: int):
         """Handle bet result using CLASSIC MARTINGALE"""
-        # WIN: multiplier >= auto_cashout
         if multiplier >= self.strategy.auto_cashout:
             profit = self.strategy.current_bet * (self.strategy.auto_cashout - 1)
             self.strategy.total_profit += profit
@@ -1090,12 +1050,10 @@ class ClassicMartingaleBot:
             )
             self.log(f"  Profit: +${profit:,.0f} | Total: ${self.total_profit:,.0f}")
 
-            # CLASSIC MARTINGALE: Reset to base bet after WIN
             self.strategy.reset_after_win()
             self.log(f"  Reset to base bet: ${self.strategy.base_bet:,.0f}")
 
         else:
-            # LOSS: multiplier < auto_cashout
             loss = self.strategy.current_bet
             self.strategy.total_profit -= loss
             self.total_profit -= loss
@@ -1115,7 +1073,6 @@ class ClassicMartingaleBot:
             )
             self.log(f"  Loss: -${loss:,.0f} | Total: ${self.total_profit:,.0f}")
 
-            # CLASSIC MARTINGALE: Increase bet after LOSS
             self.strategy.increase_after_loss()
             self.log(f"  Consecutive losses: {self.strategy.consecutive_losses}")
             self.log(
@@ -1140,7 +1097,7 @@ class ClassicMartingaleBot:
         """Main bot loop"""
         try:
             self.log("=" * 60)
-            self.log("CLASSIC MARTINGALE CRASHER BOT")
+            self.log("CLASSIC MARTINGALE CRASHER BOT (OPTIMIZED)")
             self.log("=" * 60)
 
             if not self.init_driver():
@@ -1152,7 +1109,7 @@ class ClassicMartingaleBot:
             if not self.navigate_to_game():
                 return
 
-            time.sleep(2)
+            time.sleep(1)  # Reduced from 2
             start_balance = self.get_bank_balance()
 
             self.recover_or_create_session(start_balance)
@@ -1188,39 +1145,40 @@ class ClassicMartingaleBot:
                 if new_mult and new_mult != self.last_seen_multiplier:
                     current_time = time.time()
 
-                    # Safeguards against duplicate logging
                     time_since_last_round = current_time - self.last_round_time
-                    if self.last_round_time > 0 and time_since_last_round < 3.0:
-                        time.sleep(0.1)
+                    if (
+                        self.last_round_time > 0 and time_since_last_round < 2.0
+                    ):  # Reduced from 3.0
+                        time.sleep(0.05)  # Reduced from 0.1
                         continue
 
                     mult_key = f"{new_mult:.2f}"
                     if mult_key in last_logged_time:
                         time_since_last = current_time - last_logged_time[mult_key]
-                        if time_since_last < 5.0:
-                            time.sleep(0.1)
+                        if time_since_last < 4.0:  # Reduced from 5.0
+                            time.sleep(0.05)
                             continue
 
-                    # Update tracking
                     last_logged_time[mult_key] = current_time
                     self.last_seen_multiplier = new_mult
                     self.last_round_time = current_time
                     self.rounds_since_setup += 1
 
-                    # Clean up tracking dict
                     if len(last_logged_time) > 10:
                         oldest_key = min(last_logged_time, key=last_logged_time.get)
                         del last_logged_time[oldest_key]
 
-                    # Keep session active
-                    if self.rounds_since_setup >= 2:
+                    # OPTIMIZATION: Only re-setup auto cashout every 3 rounds instead of 2
+                    if self.rounds_since_setup >= 3:
                         self.setup_auto_cashout()
                         self.rounds_since_setup = 0
 
+                    # OPTIMIZATION: Only fetch balance occasionally to reduce load
                     bettor_count = self.get_bettor_count()
-                    bank_balance = self.get_bank_balance()
+                    bank_balance = None
+                    if self.rounds_since_setup == 0:  # Only check balance after setup
+                        bank_balance = self.get_bank_balance()
 
-                    # Add multiplier to database and get its ID
                     round_id = self.db.add_multiplier(new_mult, bettor_count)
 
                     log_parts = [f"📊 Round #{round_id}: {new_mult:.2f}x"]
@@ -1231,28 +1189,24 @@ class ClassicMartingaleBot:
 
                     self.log(" | ".join(log_parts))
 
-                    # Handle active bet result
                     if self.strategy.waiting_for_result:
                         self.handle_result(new_mult, round_id)
-
-                        # Mark this round as excluded
                         self.strategy.excluded_round_ids.add(round_id)
 
-                    # Check for new trigger (only if not waiting for result)
                     elif not self.strategy.waiting_for_result:
                         if self.check_trigger():
                             if not self.setup_auto_cashout():
                                 self.log(f"⚠️ WARNING: Failed to setup auto-cashout")
                                 continue
 
-                            time.sleep(0.5)
+                            time.sleep(0.3)  # Reduced from 0.5
                             bet_amount = self.strategy.calc_current_bet()
 
                             if self.place_bet(bet_amount):
                                 self.strategy.current_bet = bet_amount
                                 self.strategy.waiting_for_result = True
 
-                time.sleep(0.1)
+                time.sleep(0.05)  # Reduced from 0.1
 
         except KeyboardInterrupt:
             self.log("\n⏹️ Bot stopped by user")
