@@ -732,91 +732,178 @@ class ClassicMartingaleBot:
         except:
             pass
 
-    def setup_auto_cashout(self, max_retries: int = 3) -> bool:
-        """Setup auto cashout"""
+    def setup_auto_cashout(self, max_retries: int = 5) -> bool:
+        """Setup auto cashout with robust timing and state handling"""
+        from selenium.webdriver.common.action_chains import ActionChains
+        from selenium.webdriver.common.keys import Keys
+
         for retry_attempt in range(max_retries):
             try:
                 if retry_attempt > 0:
-                    time.sleep(2)
+                    self.log(f"  Retry attempt {retry_attempt + 1}/{max_retries}")
+                    time.sleep(3)  # Wait longer between retries
 
-                auto_script = """
-                try {
-                    var panels = document.querySelectorAll('div[data-singlebetpart]');
-                    var firstPanel = panels[0];
-                    var buttons = firstPanel.querySelectorAll('button');
-                    for (var i = 0; i < buttons.length; i++) {
-                        var btn = buttons[i];
-                        if (btn.offsetParent !== null) {
-                            if(btn.textContent.trim().toLowerCase() === 'auto'){
-                                btn.click();
-                                return {clicked: true};
-                            }
-                            else if (btn.textContent.trim().toLowerCase() === 'stop'){
-                                return {clicked: true};
-                            }
-                        }
-                    }
-                    return {clicked: false};
-                } catch(e) {
-                    return {clicked: false};
-                }
-                """
+                # Wait for betting panel to be stable and interactable
+                time.sleep(1)
 
-                result = self.driver.execute_script(auto_script)
-                if not result.get("clicked"):
-                    raise Exception("AUTO button not found")
-
-                time.sleep(0.2)
-
-                toggle_script = """
-                try {
-                    var panels = document.querySelectorAll('div[data-singlebetpart]');
-                    var toggle = panels[0].querySelector('input[data-testid="aut-co-tgl"]');
-                    if (toggle && !toggle.checked) {
-                        toggle.click();
-                    }
-                    return {found: toggle !== null};
-                } catch(e) {
-                    return {found: false};
-                }
-                """
-
-                self.driver.execute_script(toggle_script)
-                time.sleep(0.2)
-
-                from selenium.webdriver.common.action_chains import ActionChains
-                from selenium.webdriver.common.keys import Keys
-
+                # Find the first betting panel
                 panels = self.driver.find_elements(
                     By.CSS_SELECTOR, "div[data-singlebetpart]"
                 )
-                auto_input = panels[0].find_element(
-                    By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]'
+                if not panels:
+                    raise Exception("Betting panel not found")
+
+                first_panel = panels[0]
+
+                # Step 1: Check current mode and only click AUTO if needed
+                buttons = first_panel.find_elements(By.TAG_NAME, "button")
+                current_mode = None
+                auto_button = None
+
+                for btn in buttons:
+                    try:
+                        if btn.is_displayed() and btn.is_enabled():
+                            button_text = btn.text.strip().lower()
+                            if button_text in ["auto", "stop"]:
+                                current_mode = button_text
+                                auto_button = btn
+                                break
+                    except:
+                        continue
+
+                if not auto_button:
+                    raise Exception("AUTO/STOP button not found")
+
+                # Only click if we're NOT already in AUTO mode
+                if current_mode == "auto":
+                    self.log("  ✓ Switching to AUTO mode...")
+                    WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable(auto_button)
+                    )
+                    auto_button.click()
+                    time.sleep(0.5)
+                elif current_mode == "stop":
+                    self.log("  ✓ Already in AUTO mode")
+                else:
+                    raise Exception(f"Unexpected button state: {current_mode}")
+
+                # Step 2: Wait for auto cashout controls to appear
+                time.sleep(0.3)
+
+                # Step 3: Check and enable auto cashout toggle if needed
+                try:
+                    toggle = WebDriverWait(first_panel, 5).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, 'input[data-testid="aut-co-tgl"]')
+                        )
+                    )
+
+                    # Wait for toggle to be interactable
+                    time.sleep(0.2)
+
+                    # Check if toggle is already selected
+                    is_selected = toggle.is_selected()
+
+                    if not is_selected:
+                        # Click the label for better reliability
+                        toggle_label = first_panel.find_element(
+                            By.CSS_SELECTOR,
+                            'label[data-testid="toggle-label"][for="autocashout0"]',
+                        )
+                        WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable(toggle_label)
+                        )
+                        toggle_label.click()
+                        time.sleep(0.3)
+                        self.log("  ✓ Enabled auto cashout toggle")
+                    else:
+                        self.log("  ✓ Auto cashout toggle already enabled")
+
+                except Exception as e:
+                    self.log(f"  ⚠️ Toggle issue: {e}")
+                    # Continue anyway, might already be enabled
+
+                # Step 4: Wait for input to be ready and interactable
+                time.sleep(0.3)
+
+                # Step 5: Find and interact with auto cashout input using ActionChains
+                auto_input = WebDriverWait(first_panel, 5).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, 'input[data-testid="aut-co-inp"]')
+                    )
                 )
 
+                # Wait for it to be enabled and visible
+                for wait_attempt in range(10):
+                    if auto_input.is_displayed() and auto_input.is_enabled():
+                        break
+                    time.sleep(0.3)
+                else:
+                    raise Exception("Auto cashout input not interactable after waiting")
+
+                # Read current value
+                current_value = auto_input.get_attribute("value")
+                self.log(f"  Current auto cashout value: {current_value}")
+
+                # Use ActionChains to clear and set the value
                 actions = ActionChains(self.driver)
+
+                # Click the input to focus it
                 actions.move_to_element(auto_input).click().perform()
+                time.sleep(0.2)
+
+                # Select all and delete
+                actions.key_down(Keys.CONTROL).send_keys("a").key_up(
+                    Keys.CONTROL
+                ).perform()
+                time.sleep(0.1)
+                actions.send_keys(Keys.DELETE).perform()
                 time.sleep(0.1)
 
-                for _ in range(5):
-                    auto_input.send_keys(Keys.BACKSPACE)
-                time.sleep(0.1)
+                # Alternative: use multiple backspaces to ensure it's cleared
+                for _ in range(10):
+                    actions.send_keys(Keys.BACKSPACE).perform()
+                    time.sleep(0.05)
 
-                auto_input.send_keys(str(self.strategy.auto_cashout))
-                time.sleep(0.1)
+                # Enter new value
+                actions.send_keys(str(self.strategy.auto_cashout)).perform()
+                time.sleep(0.2)
 
+                # Press Enter or Tab to confirm the value
+                actions.send_keys(Keys.TAB).perform()
+                time.sleep(0.3)
+
+                # Step 6: Verify the value was set correctly
                 final_value = auto_input.get_attribute("value")
 
-                if abs(float(final_value) - self.strategy.auto_cashout) < 0.01:
-                    self.log(f"✓ Auto cashout set to {final_value}x")
+                # Try to parse the value (handle both "2.5" and "2,5" formats)
+                try:
+                    final_float = float(final_value.replace(",", ".").replace(" ", ""))
+                except:
+                    final_float = 0.0
+
+                self.log(f"  Final auto cashout value: {final_value}")
+
+                if abs(final_float - self.strategy.auto_cashout) < 0.01:
+                    self.log(f"✓ Auto cashout successfully set to {final_value}x")
                     self.auto_cashout_configured = True
                     return True
                 else:
+                    self.log(
+                        f"  ⚠️ Value mismatch: expected {self.strategy.auto_cashout}, got {final_value}"
+                    )
                     if retry_attempt < max_retries - 1:
+                        self.log(f"  Retrying...")
                         continue
                     return False
 
+            except TimeoutException as e:
+                self.log(f"  ⚠️ Timeout on attempt {retry_attempt + 1}: {e}")
+                if retry_attempt == max_retries - 1:
+                    return False
+
             except Exception as e:
+                self.log(f"  ⚠️ Attempt {retry_attempt + 1} failed: {e}")
                 if retry_attempt == max_retries - 1:
                     return False
 
@@ -1046,7 +1133,7 @@ class ClassicMartingaleBot:
         return True
 
     def run(self):
-        """Main bot loop - FIXED duplicate detection"""
+        """Main bot loop"""
         try:
             self.log("=" * 60)
             self.log("CLASSIC MARTINGALE CRASHER BOT")
@@ -1086,9 +1173,7 @@ class ClassicMartingaleBot:
             self.log("=" * 60)
 
             self.running = True
-            last_detection_time = (
-                0  # CHANGED: Use timestamp instead of multiplier value
-            )
+            last_logged_time = {}
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -1096,23 +1181,32 @@ class ClassicMartingaleBot:
 
                 new_mult = self.detect_current_multiplier()
 
-                # FIXED: Check based on timing, not multiplier value
-                if new_mult is not None:
+                if new_mult and new_mult != self.last_seen_multiplier:
                     current_time = time.time()
 
-                    # NEW LOGIC: Minimum 3 seconds between rounds
-                    time_since_last = current_time - last_detection_time
-
-                    if last_detection_time > 0 and time_since_last < 3.0:
-                        # Too soon - this is likely the same round
+                    # Safeguards against duplicate logging
+                    time_since_last_round = current_time - self.last_round_time
+                    if self.last_round_time > 0 and time_since_last_round < 3.0:
                         time.sleep(0.1)
                         continue
 
-                    # This is a new round!
-                    last_detection_time = current_time
+                    mult_key = f"{new_mult:.2f}"
+                    if mult_key in last_logged_time:
+                        time_since_last = current_time - last_logged_time[mult_key]
+                        if time_since_last < 5.0:
+                            time.sleep(0.1)
+                            continue
+
+                    # Update tracking
+                    last_logged_time[mult_key] = current_time
                     self.last_seen_multiplier = new_mult
                     self.last_round_time = current_time
                     self.rounds_since_setup += 1
+
+                    # Clean up tracking dict
+                    if len(last_logged_time) > 10:
+                        oldest_key = min(last_logged_time, key=last_logged_time.get)
+                        del last_logged_time[oldest_key]
 
                     # Keep session active
                     if self.rounds_since_setup >= 20:
