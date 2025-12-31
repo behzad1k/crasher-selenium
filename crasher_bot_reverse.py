@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+
 try:
     import undetected_chromedriver as uc
 
@@ -734,8 +737,7 @@ class ClassicMartingaleBot:
 
     def setup_auto_cashout(self, max_retries: int = 5) -> bool:
         """Setup auto cashout with robust timing and state handling"""
-        from selenium.webdriver.common.action_chains import ActionChains
-        from selenium.webdriver.common.keys import Keys
+        self.log(f" Auto Cashout started")
 
         for retry_attempt in range(max_retries):
             try:
@@ -743,13 +745,11 @@ class ClassicMartingaleBot:
                     self.log(f"  Retry attempt {retry_attempt + 1}/{max_retries}")
                     time.sleep(2)  # Wait longer between retries
 
-                # Wait for betting panel to be stable and interactable
-                time.sleep(0.5)
-
                 # Find the first betting panel
                 panels = self.driver.find_elements(
                     By.CSS_SELECTOR, "div[data-singlebetpart]"
                 )
+                self.log(f" Panel Found")
                 if not panels:
                     raise Exception("Betting panel not found")
 
@@ -759,6 +759,7 @@ class ClassicMartingaleBot:
                 buttons = first_panel.find_elements(By.TAG_NAME, "button")
                 current_mode = None
                 auto_button = None
+                self.log(f" Buttons Found")
 
                 for btn in buttons:
                     try:
@@ -780,15 +781,17 @@ class ClassicMartingaleBot:
                     WebDriverWait(self.driver, 5).until(
                         EC.element_to_be_clickable(auto_button)
                     )
+                    self.log(f"Auto Button clicked")
+
                     auto_button.click()
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                 elif current_mode == "stop":
                     self.log("  ✓ Already in AUTO mode")
                 else:
                     raise Exception(f"Unexpected button state: {current_mode}")
 
                 # Step 2: Wait for auto cashout controls to appear
-                time.sleep(0.3)
+                time.sleep(0.2)
 
                 # Step 3: Check and enable auto cashout toggle if needed
                 try:
@@ -797,6 +800,7 @@ class ClassicMartingaleBot:
                             (By.CSS_SELECTOR, 'input[data-testid="aut-co-tgl"]')
                         )
                     )
+                    self.log(f"Toggle Found")
 
                     # Wait for toggle to be interactable
                     time.sleep(0.2)
@@ -810,11 +814,15 @@ class ClassicMartingaleBot:
                             By.CSS_SELECTOR,
                             'label[data-testid="toggle-label"][for="autocashout0"]',
                         )
+                        self.log(f"Toggle Label Found")
+
                         WebDriverWait(self.driver, 5).until(
                             EC.element_to_be_clickable(toggle_label)
                         )
                         toggle_label.click()
-                        time.sleep(0.3)
+                        self.log(f"Toggle Label Clicked")
+
+                        time.sleep(0.1)
                         self.log("  ✓ Enabled auto cashout toggle")
                     else:
                         self.log("  ✓ Auto cashout toggle already enabled")
@@ -824,7 +832,7 @@ class ClassicMartingaleBot:
                     # Continue anyway, might already be enabled
 
                 # Step 4: Wait for input to be ready and interactable
-                time.sleep(0.3)
+                time.sleep(0.1)
 
                 # Step 5: Find and interact with auto cashout input using ActionChains
                 auto_input = WebDriverWait(first_panel, 5).until(
@@ -833,8 +841,12 @@ class ClassicMartingaleBot:
                     )
                 )
 
+                self.log(f"Input Found")
+
                 # Wait for it to be enabled and visible
                 for wait_attempt in range(10):
+                    self.log(f"Waiting for auto input")
+
                     if auto_input.is_displayed() and auto_input.is_enabled():
                         break
                     time.sleep(0.3)
@@ -851,15 +863,19 @@ class ClassicMartingaleBot:
                 # Click the input to focus it
                 actions.move_to_element(auto_input).click().perform()
                 time.sleep(0.2)
+                self.log(f"Input clicked")
 
                 # Use multiple backspaces to ensure it's cleared
                 for _ in range(4):
                     actions.send_keys(Keys.BACKSPACE).perform()
                     time.sleep(0.05)
 
+                self.log(f"Deleted")
+
                 # Enter new value
                 actions.send_keys(str(self.strategy.auto_cashout)).perform()
                 time.sleep(0.2)
+                self.log(f"new inputed")
 
                 # Step 6: Verify the value was set correctly
                 final_value = auto_input.get_attribute("value")
