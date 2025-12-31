@@ -1213,7 +1213,7 @@ class ClassicMartingaleBot:
                         del last_logged_time[oldest_key]
 
                     # Keep session active
-                    if self.rounds_since_setup >= 20:
+                    if self.rounds_since_setup >= 2:
                         self.setup_auto_cashout()
                         self.rounds_since_setup = 0
 
