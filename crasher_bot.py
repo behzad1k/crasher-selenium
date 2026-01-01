@@ -11,7 +11,12 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from this import d
 from typing import Dict, List, Optional, Tuple
+
+import numpy as np  # Needed for volatility calculation
+
+from prediction_module import PredictionAnalyzer, create_game_state_tracker
 
 try:
     import undetected_chromedriver as uc
@@ -36,6 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass
 @dataclass
 class StrategyState:
     """Track state for a single strategy"""
@@ -147,8 +153,6 @@ class SessionManager:
                 self.conn.commit()
                 self.log(f"✓ Migrated old data to session #{new_session_id}")
 
-                # Now fall through to normal query
-
         # Get the last session without end_timestamp (active session)
         cursor.execute("""
             SELECT s.id, MAX(m.timestamp), COUNT(m.id)
@@ -219,15 +223,7 @@ class SessionManager:
         start_time: datetime,
         end_time: datetime,
     ):
-        """
-        Add missing rounds to database with estimated timestamps
-
-        Args:
-            session_id: Session to add rounds to
-            multipliers: List of multipliers (chronological order)
-            start_time: Time of first missing round (estimate)
-            end_time: Time of last missing round (actual)
-        """
+        """Add missing rounds to database with estimated timestamps"""
         if not multipliers:
             return
 
@@ -377,6 +373,9 @@ class MultiStrategyCrasherBot:
         self.strategy_active = (
             False  # Flag to prevent multiple strategies from running simultaneously
         )
+        # NEW: Prediction analysis module
+        self.prediction_analyzer = None  # Will be initialized after DB is ready
+        self.game_state_tracker = create_game_state_tracker()
 
     def _load_strategies(self):
         """Load all strategies from config"""
@@ -418,22 +417,22 @@ class MultiStrategyCrasherBot:
         """
         try:
             script = """
-            var resultItems = document.querySelectorAll('span.sc-w0koce-1.giBFzM');
-            var multipliers = [];
+                var resultItems = document.querySelectorAll('span.sc-w0koce-1.giBFzM');
+                var multipliers = [];
 
-            for (var i = 0; i < resultItems.length; i++) {
-                var text = resultItems[i].textContent.trim();
-                if (text.endsWith('x')) {
-                    var value = parseFloat(text.replace('x', ''));
-                    if (!isNaN(value)) {
-                        multipliers.push(value);
+                for (var i = 0; i < resultItems.length; i++) {
+                    var text = resultItems[i].textContent.trim();
+                    if (text.endsWith('x')) {
+                        var value = parseFloat(text.replace('x', ''));
+                        if (!isNaN(value)) {
+                            multipliers.push(value);
+                        }
                     }
                 }
-            }
 
-            // Return in reverse order (oldest to newest)
-            return multipliers.reverse();
-            """
+                // Return in reverse order (oldest to newest)
+                return multipliers.reverse();
+                """
 
             multipliers = self.driver.execute_script(script)
 
@@ -1143,6 +1142,43 @@ class MultiStrategyCrasherBot:
         # Always set waiting_for_result to False after processing result
         strategy.waiting_for_result = False
 
+    def analyze_and_log_predictions(self, current_multiplier_id: int):
+        """
+        Analyze current game state and log prediction signals
+        Only runs when no betting strategy is active
+        """
+        if self.strategy_active:
+            # Don't analyze when a strategy is actively betting
+            return
+
+        # Update game state tracker
+        recent = self.db.get_recent_multipliers(1)
+        if recent:
+            self.game_state_tracker.add_multiplier(recent[0])
+
+        # Get current game state
+        game_state = self.game_state_tracker.get_game_state()
+        game_state["session_id"] = self.db.current_session_id
+
+        # Analyze with all methods
+        triggered_methods, matching_combos = self.prediction_analyzer.analyze_round(
+            game_state, current_multiplier_id
+        )
+
+        # Log results
+        if triggered_methods or matching_combos:
+            self.log("=" * 60)
+            self.log("🎯 PREDICTION ANALYSIS:")
+
+            output_lines = self.prediction_analyzer.format_analysis_output(
+                triggered_methods, matching_combos
+            )
+
+            for line in output_lines:
+                self.log(f"   {line}")
+
+            self.log("=" * 60)
+
     def check_stop_conditions(self) -> bool:
         """Check if we should stop"""
         if self.total_profit <= -self.max_loss:
@@ -1159,10 +1195,10 @@ class MultiStrategyCrasherBot:
         return True
 
     def run(self):
-        """Main bot loop - FIXED duplicate detection"""
+        """Main bot loop - with prediction analysis integrated"""
         try:
             self.log("=" * 60)
-            self.log("MULTI-STRATEGY CRASHER BOT - ENHANCED")
+            self.log("MULTI-STRATEGY CRASHER BOT - ENHANCED WITH PREDICTIONS")
             self.log("=" * 60)
 
             if not self.init_driver():
@@ -1181,6 +1217,12 @@ class MultiStrategyCrasherBot:
             # Attempt session recovery
             self.recover_or_create_session(start_balance)
 
+            self.prediction_analyzer = PredictionAnalyzer(self.db.conn, self.log)
+            self.log("✓ Prediction analyzer initialized")
+            # NEW: Initialize prediction analyzer
+            self.prediction_analyzer = PredictionAnalyzer(self.db.conn, self.log)
+            self.log("✓ Prediction analyzer initialized with 10 methods")
+
             # Initial setup
             first_strategy = list(self.strategies.values())[0]
             if not self.setup_auto_cashout(first_strategy):
@@ -1195,14 +1237,14 @@ class MultiStrategyCrasherBot:
                 )
                 self.log(f"    Cashout: {strategy.auto_cashout}x")
             self.log("=" * 60)
-            self.log("BOT RUNNING - Monitoring multipliers...")
+            self.log(
+                "BOT RUNNING - Monitoring multipliers and analyzing predictions..."
+            )
             self.log("=" * 60)
 
             self.running = True
             active_strategy_name = None
-            last_detection_time = (
-                0  # CHANGED: Use timestamp instead of multiplier value
-            )
+            last_logged_time = {}  # Track when each multiplier was last logged
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -1210,25 +1252,35 @@ class MultiStrategyCrasherBot:
 
                 new_mult = self.detect_current_multiplier()
 
-                # FIXED: Check based on timing, not multiplier value
-                if new_mult is not None:
+                if new_mult and new_mult != self.last_seen_multiplier:
+                    # Additional safeguards to prevent duplicate logging
                     current_time = time.time()
 
-                    # NEW LOGIC: Minimum 3 seconds between rounds (prevents duplicates)
-                    time_since_last = current_time - last_detection_time
-
-                    if last_detection_time > 0 and time_since_last < 3.0:
-                        # Too soon - this is likely the same round still being detected
+                    # Safeguard 1: Minimum 3 seconds between rounds
+                    time_since_last_round = current_time - self.last_round_time
+                    if self.last_round_time > 0 and time_since_last_round < 3.0:
                         time.sleep(0.1)
                         continue
 
-                    # This is a new round!
-                    last_detection_time = current_time
-                    self.last_seen_multiplier = (
-                        new_mult  # Still update for session recovery
-                    )
+                    # Safeguard 2: Don't log same multiplier value within 5 seconds
+                    mult_key = f"{new_mult:.2f}"
+
+                    if mult_key in last_logged_time:
+                        time_since_last = current_time - last_logged_time[mult_key]
+                        if time_since_last < 5.0:
+                            time.sleep(0.1)
+                            continue
+
+                    # Update tracking
+                    last_logged_time[mult_key] = current_time
+                    self.last_seen_multiplier = new_mult
                     self.last_round_time = current_time
                     self.rounds_since_setup += 1
+
+                    # Clean up old entries from tracking dict (keep last 10)
+                    if len(last_logged_time) > 10:
+                        oldest_key = min(last_logged_time, key=last_logged_time.get)
+                        del last_logged_time[oldest_key]
 
                     if self.rounds_since_setup >= 20:
                         self.log("Keeping session active...")
@@ -1246,6 +1298,17 @@ class MultiStrategyCrasherBot:
 
                     self.log(" | ".join(log_parts))
                     self.db.add_multiplier(new_mult, bettor_count)
+
+                    cursor = self.db.conn.cursor()
+                    cursor.execute("SELECT last_insert_rowid()")
+                    current_mult_id = cursor.fetchone()[0]
+
+                    # Run prediction analysis (only if no strategy is active)
+                    if not self.strategy_active and not active_strategy_name:
+                        try:
+                            self.analyze_and_log_predictions(current_mult_id)
+                        except Exception as e:
+                            self.log(f"Prediction analysis error: {e}")
 
                     # CRITICAL: Handle result for active strategy
                     if active_strategy_name:

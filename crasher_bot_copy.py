@@ -19,6 +19,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np  # Needed for volatility calculation
+
+from prediction_module import PredictionAnalyzer, create_game_state_tracker
+
 try:
     import undetected_chromedriver as uc
 
@@ -345,7 +349,8 @@ class MultiStrategyCrasherBot:
         # Load strategies
         self.strategies: Dict[str, StrategyState] = {}
         self._load_strategies()
-
+        self.prediction_analyzer = None  # Will be initialized after DB is ready
+        self.game_state_tracker = create_game_state_tracker()
         # Bot state
         self.driver = None
         self.wait = None
@@ -1371,6 +1376,9 @@ class MultiStrategyCrasherBot:
 
             self.recover_or_create_session(start_balance)
 
+            self.prediction_analyzer = PredictionAnalyzer(self.db.conn, self.log)
+            self.log("✓ Prediction analyzer initialized")
+
             self.log("=" * 60)
             self.log("ACTIVE STRATEGIES:")
             for name, strategy in self.strategies.items():
@@ -1424,7 +1432,16 @@ class MultiStrategyCrasherBot:
                             log_parts.append(f"Bank: {bank_balance:,.0f}")
 
                         self.log(" | ".join(log_parts))
-                        self.db.add_multiplier(new_mult, bettor_count)
+                        self.db.add_multiplier(new_mult, bettor_count)cursor = self.db.conn.cursor()
+                        cursor.execute("SELECT last_insert_rowid()")
+                        current_mult_id = cursor.fetchone()[0]
+
+                        # Run prediction analysis (only if no strategy is active)
+                        if not self.strategy_active and not active_strategy_name:
+                            try:
+                                self.analyze_and_log_predictions(current_mult_id)
+                            except Exception as e:
+                                self.log(f"Prediction analysis error: {e}")
 
                     # Handle result for active strategy
                     if active_strategy_name:
