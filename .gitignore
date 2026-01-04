@@ -7,3 +7,5 @@ bot_config_classic.json
 chromedriver_cache/
 crasher_data_inverse.db
 import-data/crasher_bot
+data-analyze/hot-streaks/combination_results.json
+data-analyze/hot-streaks/*.md
