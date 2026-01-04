@@ -34,33 +34,22 @@ class Method1_ProgressiveWindow(PredictionMethod):
     def check_trigger(self, game_state: Dict) -> Optional[Dict]:
         rounds_since_hot = game_state.get("rounds_since_last_hotstreak", 0)
 
-        # Only trigger if we're tracking rounds
         if rounds_since_hot == 0:
             return None
 
-        if rounds_since_hot <= 5:
+        # Loosened: trigger 3-8 rounds (was 3-6)
+        if 3 <= rounds_since_hot <= 8:
             return {
-                "prediction": 3,
+                "prediction": 5,
                 "confidence": 0.362,
-                "details": f"0-5 window (36.2% prob)",
+                "details": f"Early window ({rounds_since_hot}r)",
             }
-        elif rounds_since_hot <= 15:
+        # Add medium window
+        elif 9 <= rounds_since_hot <= 15:
             return {
-                "prediction": 11,
+                "prediction": 12,
                 "confidence": 0.229,
-                "details": f"6-15 window (22.9% prob)",
-            }
-        elif rounds_since_hot <= 30:
-            return {
-                "prediction": 23,
-                "confidence": 0.203,
-                "details": f"16-30 window (20.3% prob)",
-            }
-        elif rounds_since_hot > 30:
-            return {
-                "prediction": 40,
-                "confidence": 0.125,
-                "details": f"31+ window (low prob)",
+                "details": f"Medium window ({rounds_since_hot}r)",
             }
 
         return None
@@ -81,51 +70,46 @@ class Method2_CompositeSignal(PredictionMethod):
         elif game_state.get("last_streak_type") == "weak":
             score += 1
 
-        # Signal 2: Last streak quality
-        if game_state.get("last_streak_average", 0) > 6.0:
+        # Signal 2: Last streak quality (loosened)
+        if game_state.get("last_streak_average", 0) > 5.0:  # Was 6.0
             score += 1
 
-        # Signal 3: Pre-pattern (4+ rounds ≥2.0x in last 10)
+        # Signal 3: Pre-pattern
         last_10 = game_state.get("last_10_before_streak", [])
         if len(last_10) == 10:
             above_2x = sum(1 for m in last_10 if m >= 2.0)
             if above_2x >= 4:
                 score += 1
 
-        # Signal 4: Post-momentum (5+ rounds ≥2.0x in first 10 after)
+        # Signal 4: Post-momentum (loosened)
         first_10_after = game_state.get("first_10_after_streak", [])
         if len(first_10_after) == 10:
             above_2x = sum(1 for m in first_10_after if m >= 2.0)
-            if above_2x >= 5:
+            if above_2x >= 4:  # Was 5
                 score += 2
 
         # Signal 5: No cold streak
         if not game_state.get("cold_streak_occurred", False):
             score += 1
 
-        # Only trigger if we have enough signals
+        # Loosened: trigger at score 3+ (was 4+)
         if score < 3:
             return None
 
-        # Prediction based on score
-        if score >= 6:
+        if score >= 5:
             return {
-                "prediction": 2,
-                "confidence": 0.80,
-                "details": f"Score:{score}/7 (Strong)",
+                "prediction": 3,
+                "confidence": 0.75,
+                "details": f"Score:{score}/7 (Very strong)",
             }
-        elif score >= 4:
+        elif score >= 3:
             return {
-                "prediction": 5,
-                "confidence": 0.65,
+                "prediction": 8,
+                "confidence": 0.60,
                 "details": f"Score:{score}/7 (Medium)",
             }
-        else:
-            return {
-                "prediction": 14,
-                "confidence": 0.45,
-                "details": f"Score:{score}/7 (Weak)",
-            }
+
+        return None
 
 
 class Method3_StreakAverage(PredictionMethod):
@@ -137,32 +121,21 @@ class Method3_StreakAverage(PredictionMethod):
     def check_trigger(self, game_state: Dict) -> Optional[Dict]:
         avg = game_state.get("last_streak_average", 0)
 
-        if avg == 0:
+        # Loosened: 4.0 instead of 6.0
+        if avg == 0 or avg < 4.0:
             return None
 
-        if avg >= 10.0:
+        if avg >= 6.0:
             return {
-                "prediction": 10,
-                "confidence": 0.55,
-                "details": "Extreme quality (>10x)",
+                "prediction": 3,
+                "confidence": 0.65,
+                "details": "Extreme quality (>6x)",
             }
-        elif avg >= 6.0:
+        else:  # 4.0-6.0
             return {
-                "prediction": 13,
+                "prediction": 7,
                 "confidence": 0.50,
-                "details": "High quality (6-10x)",
-            }
-        elif avg >= 4.0:
-            return {
-                "prediction": 12,
-                "confidence": 0.45,
-                "details": "Medium quality (4-6x)",
-            }
-        else:
-            return {
-                "prediction": 12,
-                "confidence": 0.40,
-                "details": "Low quality (<4x)",
+                "details": "High quality (4-6x)",
             }
 
 
@@ -179,25 +152,23 @@ class Method4_ColdStreak(PredictionMethod):
         if rounds_since_hot == 0:
             return None
 
-        # Rule of 17: If no cold by round 17, hot is imminent
+        # Rule of 17: Special high-confidence signal
         if rounds_since_hot >= 17 and not has_cold:
             return {
                 "prediction": 5,
                 "confidence": 0.87,
                 "details": "Rule of 17! (87% prob)",
             }
-        elif rounds_since_hot <= 8:
+
+        # Loosened: Also trigger in critical zone (10-16 rounds)
+        elif rounds_since_hot >= 10 and has_cold:
             return {
-                "prediction": 11,
-                "confidence": 0.50,
-                "details": "Monitor zone (8r)",
-            }
-        else:
-            return {
-                "prediction": 11,
-                "confidence": 0.60,
+                "prediction": 12,
+                "confidence": 0.55,
                 "details": f"Critical zone ({rounds_since_hot}r)",
             }
+
+        return None
 
 
 class Method5_Momentum(PredictionMethod):
@@ -214,30 +185,21 @@ class Method5_Momentum(PredictionMethod):
 
         above_2x = sum(1 for m in first_10 if m >= 2.0)
 
+        # Loosened: trigger at 5+ instead of 7+
         if above_2x >= 7:
             return {
-                "prediction": 0,
+                "prediction": 2,
                 "confidence": 0.75,
-                "details": f"Very High momentum ({above_2x}/10)",
+                "details": f"Very high momentum ({above_2x}/10)",
             }
         elif above_2x >= 5:
             return {
-                "prediction": 2,
-                "confidence": 0.70,
+                "prediction": 5,
+                "confidence": 0.60,
                 "details": f"High momentum ({above_2x}/10)",
             }
-        elif above_2x == 4:
-            return {
-                "prediction": 7,
-                "confidence": 0.55,
-                "details": f"Medium momentum ({above_2x}/10)",
-            }
-        else:
-            return {
-                "prediction": 19,
-                "confidence": 0.45,
-                "details": f"Low momentum ({above_2x}/10)",
-            }
+
+        return None
 
 
 class Method6_StreakType(PredictionMethod):
@@ -252,17 +214,18 @@ class Method6_StreakType(PredictionMethod):
         if not streak_type:
             return None
 
+        # Loosened: trigger on both strong and weak
         if streak_type == "strong":
             return {
                 "prediction": 5,
-                "confidence": 0.60,
+                "confidence": 0.65,
                 "details": "Strong streak (80%+ ≥2x)",
             }
-        else:
+        else:  # weak
             return {
-                "prediction": 12,
-                "confidence": 0.50,
-                "details": "Weak streak (65-79% ≥2x)",
+                "prediction": 10,
+                "confidence": 0.45,
+                "details": "Weak streak (70-79% ≥2x)",
             }
 
 
@@ -275,19 +238,10 @@ class Method7_Volatility(PredictionMethod):
     def check_trigger(self, game_state: Dict) -> Optional[Dict]:
         volatility = game_state.get("last_streak_volatility", 0)
 
-        if volatility == 0:
+        if volatility == 0 or volatility <= 30.0:  # ← Only high volatility
             return None
 
-        if volatility > 38.0:
-            return {"prediction": 11, "confidence": 0.48, "details": "High volatility"}
-        elif volatility > 21.0:
-            return {
-                "prediction": 12,
-                "confidence": 0.45,
-                "details": "Medium volatility",
-            }
-        else:
-            return {"prediction": 12, "confidence": 0.43, "details": "Low volatility"}
+        return {"prediction": 11, "confidence": 0.48, "details": "High volatility"}
 
 
 class Method8_SessionPattern(PredictionMethod):
@@ -298,18 +252,19 @@ class Method8_SessionPattern(PredictionMethod):
 
     def check_trigger(self, game_state: Dict) -> Optional[Dict]:
         session_id = game_state.get("session_id", 0)
+        rounds_since_hot = game_state.get("rounds_since_last_hotstreak", 0)
 
-        # High activity sessions (from analysis)
-        high_activity_sessions = [60, 65, 11, 32, 34, 58, 7, 46, 44, 43]
+        # Loosened: more sessions + earlier trigger
+        high_activity_sessions = [60, 65, 11, 32, 34, 58]  # Was top 3, now top 6
 
-        if session_id in high_activity_sessions:
+        if session_id in high_activity_sessions and rounds_since_hot >= 8:  # Was 12
             return {
-                "prediction": 9,
+                "prediction": 10,
                 "confidence": 0.45,
                 "details": f"Active session #{session_id}",
             }
-        else:
-            return {"prediction": 11, "confidence": 0.40, "details": "Normal session"}
+
+        return None
 
 
 class Method9_PrePattern(PredictionMethod):
@@ -328,19 +283,15 @@ class Method9_PrePattern(PredictionMethod):
         avg = sum(last_10) / 10
         max_val = max(last_10)
 
-        # Signature pattern check
-        if above_2x >= 4 and avg >= 3.5 and max_val >= 7.0:
+        # Loosened: 4+ rounds (was 5+), avg 3.0 (was 3.5)
+        if above_2x >= 4 and avg >= 3.0 and max_val >= 6.0:  # All loosened
             return {
                 "prediction": 8,
                 "confidence": 0.50,
-                "details": f"Signature match ({above_2x}/10 ≥2x)",
+                "details": f"Signature match ({above_2x}/10 ≥2x, avg:{avg:.1f})",
             }
-        else:
-            return {
-                "prediction": 13,
-                "confidence": 0.35,
-                "details": f"No signature ({above_2x}/10 ≥2x)",
-            }
+
+        return None
 
 
 class Method10_Chain(PredictionMethod):
@@ -351,22 +302,20 @@ class Method10_Chain(PredictionMethod):
 
     def check_trigger(self, game_state: Dict) -> Optional[Dict]:
         last_gap = game_state.get("last_hotstreak_gap", None)
+        rounds_since_hot = game_state.get("rounds_since_last_hotstreak", 0)
 
         if last_gap is None:
             return None
 
-        if last_gap <= 5:
+        # Loosened: gap ≤5 (was ≤3), rounds 2-8 (was 2-6)
+        if last_gap <= 5 and 2 <= rounds_since_hot <= 8:
             return {
-                "prediction": 3,
-                "confidence": 0.335,
-                "details": f"In chain (gap:{last_gap}r)",
+                "prediction": last_gap + 1,
+                "confidence": 0.40,
+                "details": f"Chain pattern (gap:{last_gap}r, at {rounds_since_hot}r)",
             }
-        else:
-            return {
-                "prediction": 11,
-                "confidence": 0.30,
-                "details": "No chain detected",
-            }
+
+        return None
 
 
 class PredictionAnalyzer:
@@ -614,7 +563,7 @@ def create_game_state_tracker():
         def _detect_hotstreak(self):
             """Detect if we're in/just ended a hot streak"""
             # Check windows of 10-15 rounds
-            for window_size in range(15, 9, -1):
+            for window_size in range(15, 12, -1):
                 if len(self.recent_multipliers) < window_size:
                     continue
 
@@ -622,7 +571,7 @@ def create_game_state_tracker():
                 above_2x = sum(1 for m in window if m >= 2.0)
                 percentage = above_2x / window_size
 
-                if percentage >= 0.65:  # Weak or strong hot streak
+                if percentage >= 0.70:  # Weak or strong hot streak
                     streak_type = "strong" if percentage >= 0.80 else "weak"
                     avg = sum(window) / window_size
 
