@@ -1,6 +1,6 @@
 """
-Hot Streak Prediction Module
-Analyzes game state and provides predictions using 10 methods and their combinations
+Hot Streak Prediction Module - Updated with Database Combination Loading
+Analyzes game state and loads combinations from database with timing data
 """
 
 import json
@@ -319,81 +319,7 @@ class Method10_Chain(PredictionMethod):
 
 
 class PredictionAnalyzer:
-    """Main analyzer that checks all methods and combinations"""
-
-    # Top 10 combinations from analysis
-    TOP_COMBINATIONS = [
-        {
-            "rank": 1,
-            "methods": [1, 3, 4, 5, 6],
-            "name": "M1+M3+M4+M5+M6",
-            "accuracy": 67.7,
-            "description": "The Champion",
-        },
-        {
-            "rank": 2,
-            "methods": [1, 4, 5, 6],
-            "name": "M1+M4+M5+M6",
-            "accuracy": 67.7,
-            "description": "The Efficient (BEST)",
-        },
-        {
-            "rank": 3,
-            "methods": [1, 2, 4, 5],
-            "name": "M1+M2+M4+M5",
-            "accuracy": 67.4,
-            "description": "Precision Striker",
-        },
-        {
-            "rank": 4,
-            "methods": [3, 4, 5, 6],
-            "name": "M3+M4+M5+M6",
-            "accuracy": 67.4,
-            "description": "Pure Predictor",
-        },
-        {
-            "rank": 5,
-            "methods": [2, 3, 4, 6],
-            "name": "M2+M3+M4+M6",
-            "accuracy": 67.4,
-            "description": "Composite Specialist",
-        },
-        {
-            "rank": 6,
-            "methods": [1, 3, 4, 5],
-            "name": "M1+M3+M4+M5",
-            "accuracy": 67.4,
-            "description": "Core Four",
-        },
-        {
-            "rank": 7,
-            "methods": [2, 4, 6],
-            "name": "M2+M4+M6",
-            "accuracy": 67.4,
-            "description": "Minimalist",
-        },
-        {
-            "rank": 8,
-            "methods": [1, 3, 5, 6],
-            "name": "M1+M3+M5+M6",
-            "accuracy": 67.4,
-            "description": "Balanced Five",
-        },
-        {
-            "rank": 9,
-            "methods": [1, 2, 4, 6],
-            "name": "M1+M2+M4+M6",
-            "accuracy": 67.4,
-            "description": "Strategic Four",
-        },
-        {
-            "rank": 10,
-            "methods": [3, 4, 5],
-            "name": "M3+M4+M5",
-            "accuracy": 67.3,
-            "description": "Essential Three",
-        },
-    ]
+    """Main analyzer that checks all methods and combinations from database"""
 
     def __init__(self, conn: sqlite3.Connection, log_func=None):
         self.conn = conn
@@ -413,6 +339,74 @@ class PredictionAnalyzer:
             Method9_PrePattern(),
             Method10_Chain(),
         ]
+
+        # Load combinations from database
+        self.combinations = self._load_combinations_from_db()
+
+    def _load_combinations_from_db(self) -> List[Dict]:
+        """Load all combinations from the database with timing data"""
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("""
+                SELECT
+                    combo_id,
+                    name,
+                    short_name,
+                    method_ids,
+                    actual_accuracy,
+                    avg_predicted_rounds,
+                    earliest_prediction,
+                    latest_prediction,
+                    median_prediction,
+                    prediction_mode,
+                    prediction_accuracy_in_range
+                FROM combinations
+                ORDER BY actual_accuracy DESC
+            """)
+
+            combinations = []
+            for row in cursor.fetchall():
+                (
+                    combo_id,
+                    name,
+                    short_name,
+                    method_ids_str,
+                    accuracy,
+                    avg_pred,
+                    earliest,
+                    latest,
+                    median,
+                    pred_mode,
+                    mode_acc,
+                ) = row
+
+                # Parse method IDs
+                method_ids = [int(m) for m in method_ids_str.split(",")]
+
+                combinations.append(
+                    {
+                        "combo_id": combo_id,
+                        "name": name,
+                        "short_name": short_name,
+                        "methods": method_ids,
+                        "accuracy": accuracy or 0,
+                        "avg_predicted_rounds": avg_pred,
+                        "earliest_prediction": earliest,
+                        "latest_prediction": latest,
+                        "median_prediction": median,
+                        "prediction_mode": pred_mode,
+                        "mode_accuracy": mode_acc,
+                    }
+                )
+
+            self.log(f"✓ Loaded {len(combinations)} combinations from database")
+            return combinations
+
+        except sqlite3.OperationalError as e:
+            self.log(f"⚠️  Could not load combinations from database: {e}")
+            self.log("   Using empty combinations list")
+            return []
 
     def _init_signals_table(self):
         """Create signals table for logging predictions"""
@@ -456,7 +450,7 @@ class PredictionAnalyzer:
     def analyze_round(self, game_state: Dict, current_multiplier_id: int):
         """
         Analyze current game state and check all methods
-        Returns list of triggered methods and any matching top combinations
+        Returns list of triggered methods and any matching combinations
 
         NOTE: This should only be called ONCE per round!
         """
@@ -488,12 +482,12 @@ class PredictionAnalyzer:
                     result["details"],
                 )
 
-        # Check for top combinations
+        # Check for matching combinations from database
         matching_combinations = []
         if triggered_methods:
             triggered_ids = set(m["method_id"] for m in triggered_methods)
 
-            for combo in self.TOP_COMBINATIONS:
+            for combo in self.combinations:
                 combo_set = set(combo["methods"])
                 if combo_set.issubset(triggered_ids):
                     matching_combinations.append(combo)
@@ -503,7 +497,7 @@ class PredictionAnalyzer:
     def format_analysis_output(
         self, triggered_methods: List[Dict], matching_combinations: List[Dict]
     ) -> List[str]:
-        """Format analysis results for logging"""
+        """Format analysis results for logging with timing data"""
         output = []
 
         if not triggered_methods:
@@ -518,12 +512,29 @@ class PredictionAnalyzer:
             )
             output.append(line)
 
-        # Log matching combinations with trophy emoji
+        # Log matching combinations with timing data
         for combo in matching_combinations:
             methods_str = "+".join([f"M{m}" for m in combo["methods"]])
+
+            # Build timing info
+            timing_parts = []
+            if (
+                combo.get("earliest_prediction") is not None
+                and combo.get("latest_prediction") is not None
+            ):
+                timing_parts.append(
+                    f"Range: {combo['earliest_prediction']}-{combo['latest_prediction']}r"
+                )
+            if combo.get("median_prediction") is not None:
+                timing_parts.append(f"Median: {combo['median_prediction']:.0f}r")
+            if combo.get("prediction_mode"):
+                timing_parts.append(f"Mode: {combo['prediction_mode']}")
+
+            timing_str = " | ".join(timing_parts) if timing_parts else "No timing data"
+
             line = (
-                f"🏆 COMBO #{combo['rank']}: {methods_str} "
-                f"({combo['description']}) → Acc:{combo['accuracy']}%"
+                f"🏆 COMBO #{combo['combo_id']}: {methods_str} ({combo['short_name']}) "
+                f"→ Acc:{combo['accuracy']:.1f}% | {timing_str}"
             )
             output.append(line)
 
