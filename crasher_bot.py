@@ -1044,6 +1044,10 @@ class MultiStrategyCrasherBot:
         except:
             pass
 
+    def click_on_multiplier(self):
+        middle_multiplier = self.driver.find_element(By.CSS_SELECTOR, "span.ZmRXV")
+        middle_multiplier.click()
+
     def setup_auto_cashout(self, strategy: StrategyState, max_retries: int = 3) -> bool:
         """Setup auto cashout for a specific strategy"""
         for retry_attempt in range(max_retries):
@@ -1444,7 +1448,8 @@ class MultiStrategyCrasherBot:
 
                     if self.rounds_since_setup >= 20:
                         self.log("Keeping session active...")
-                        self.setup_auto_cashout(first_strategy)
+                        self.click_on_multiplier()
+                        # self.setup_auto_cashout(first_strategy)
                         self.rounds_since_setup = 0
 
                     bettor_count = self.get_bettor_count()
