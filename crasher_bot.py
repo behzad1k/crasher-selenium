@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Crasher Bot - Enhanced with Session Recovery
-Reads recent multipliers from page and matches with database to continue sessions
-FIXED: Proper handling of consecutive losses - strategy stays active until win
+Crasher Bot - Enhanced with Hotstreak Indicators
+Monitors game patterns and detects incoming hotstreaks based on statistical analysis
 """
 
 import json
@@ -11,12 +10,9 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from this import d
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np  # Needed for volatility calculation
-
-from prediction_module import PredictionAnalyzer, create_game_state_tracker
+import numpy as np  # Needed for standard deviation calculation
 
 try:
     import undetected_chromedriver as uc
@@ -41,7 +37,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@dataclass
 @dataclass
 class StrategyState:
     """Track state for a single strategy"""
@@ -73,6 +68,105 @@ class StrategyState:
         if self.consecutive_losses == 0:
             return self.base_bet
         return self.base_bet * (self.bet_multiplier**self.consecutive_losses)
+
+
+class HotstreakTracker:
+    """Tracks hotstreaks and analyzes patterns for prediction"""
+
+    def __init__(self):
+        self.recent_multipliers = []
+        self.current_hotstreak = None
+        self.last_hotstreak = None
+        self.hotstreak_end_round = 0
+        self.current_round = 0
+        self.rounds_after_hotstreak = 0
+        self.cold_streak_occurred = False
+        self.cold_streak_count = 0
+
+    def add_multiplier(self, multiplier: float):
+        """Add new multiplier and update tracking"""
+        self.current_round += 1
+        self.recent_multipliers.append(multiplier)
+
+        # Keep last 50 rounds for analysis
+        if len(self.recent_multipliers) > 50:
+            self.recent_multipliers.pop(0)
+
+        # Detect hotstreaks
+        self._detect_hotstreak()
+
+        # Track cold streaks
+        self._track_cold_streak(multiplier)
+
+    def _detect_hotstreak(self):
+        """Detect if we're currently in a hotstreak"""
+        # Check windows of 10-15 rounds
+        for window_size in range(15, 9, -1):
+            if len(self.recent_multipliers) < window_size:
+                continue
+
+            window = self.recent_multipliers[-window_size:]
+            above_2x = sum(1 for m in window if m >= 2.0)
+            percentage = above_2x / window_size
+
+            # Weak hotstreak: 65%+ above 2.0x
+            # Strong hotstreak: 75%+ above 2.0x
+            if percentage >= 0.65:
+                avg = sum(window) / window_size
+                streak_type = "strong" if percentage >= 0.75 else "weak"
+
+                # If this is a new hotstreak or continuation
+                if self.current_hotstreak is None:
+                    self.current_hotstreak = {
+                        "type": streak_type,
+                        "length": window_size,
+                        "average": avg,
+                        "start_round": self.current_round - window_size + 1,
+                        "multipliers": window.copy(),
+                    }
+                else:
+                    # Update existing hotstreak
+                    self.current_hotstreak["length"] = window_size
+                    self.current_hotstreak["average"] = avg
+                    self.current_hotstreak["type"] = streak_type
+                    self.current_hotstreak["multipliers"] = window.copy()
+
+                return
+
+        # No hotstreak detected - check if one just ended
+        if self.current_hotstreak is not None:
+            self.last_hotstreak = self.current_hotstreak.copy()
+            self.hotstreak_end_round = self.current_round - 1
+            self.rounds_after_hotstreak = 0
+            self.cold_streak_occurred = False
+            self.cold_streak_count = 0
+            self.current_hotstreak = None
+
+    def _track_cold_streak(self, multiplier: float):
+        """Track cold streaks (5+ consecutive rounds under 2.0x)"""
+        if self.last_hotstreak is not None:
+            self.rounds_after_hotstreak = self.current_round - self.hotstreak_end_round
+
+            if multiplier < 2.0:
+                self.cold_streak_count += 1
+                if self.cold_streak_count >= 5:
+                    self.cold_streak_occurred = True
+            else:
+                self.cold_streak_count = 0
+
+    def get_last_n_multipliers(self, n: int) -> List[float]:
+        """Get last N multipliers"""
+        if len(self.recent_multipliers) < n:
+            return []
+        return self.recent_multipliers[-n:]
+
+    def is_in_hotstreak(self) -> bool:
+        """Check if currently in a hotstreak"""
+        return self.current_hotstreak is not None
+
+    def just_ended_hotstreak(self) -> bool:
+        """Check if hotstreak just ended (within last 15 rounds)"""
+        return self.last_hotstreak is not None and self.rounds_after_hotstreak <= 15
 
 
 class SessionManager:
@@ -344,7 +438,7 @@ class Database:
 
 
 class MultiStrategyCrasherBot:
-    """Crasher bot with session recovery"""
+    """Crasher bot with hotstreak detection"""
 
     def __init__(self, config_path: str = "./bot_config.json"):
         with open(config_path, "r") as f:
@@ -363,19 +457,17 @@ class MultiStrategyCrasherBot:
         self.driver = None
         self.wait = None
         self.db = Database()
-        self.db.set_logger(self.log)  # Set logger after db creation
+        self.db.set_logger(self.log)
         self.last_seen_multiplier = None
-        self.last_round_time = 0  # Track time of last logged round
+        self.last_round_time = 0
         self.running = False
         self.auto_cashout_configured = {}
         self.rounds_since_setup = 0
         self.total_profit = 0.0
-        self.strategy_active = (
-            False  # Flag to prevent multiple strategies from running simultaneously
-        )
-        # NEW: Prediction analysis module
-        self.prediction_analyzer = None  # Will be initialized after DB is ready
-        self.game_state_tracker = create_game_state_tracker()
+        self.strategy_active = False
+
+        # Hotstreak tracking
+        self.hotstreak_tracker = HotstreakTracker()
 
     def _load_strategies(self):
         """Load all strategies from config"""
@@ -409,6 +501,116 @@ class MultiStrategyCrasherBot:
         except UnicodeEncodeError:
             clean_msg = message.encode("ascii", "ignore").decode("ascii")
             logger.info(clean_msg)
+
+    def analyze_hotstreak_indicators(self):
+        """Analyze current game state for hotstreak indicators"""
+        # Only analyze when no strategy is active
+        if self.strategy_active:
+            return
+
+        # Skip if in hotstreak
+        if self.hotstreak_tracker.is_in_hotstreak():
+            return
+
+        # Get last 10 and 15 rounds
+        last_10 = self.hotstreak_tracker.get_last_n_multipliers(10)
+        last_15 = self.hotstreak_tracker.get_last_n_multipliers(15)
+
+        if len(last_10) < 10:
+            return
+
+        # Analyze last 10 rounds
+        self._analyze_window(last_10, window_size=10)
+
+        # Analyze last 15 rounds if available
+        if len(last_15) >= 15:
+            self._analyze_window(last_15, window_size=15)
+
+        # Check for chain patterns after hotstreak
+        if self.hotstreak_tracker.just_ended_hotstreak():
+            self._check_chain_patterns()
+
+    def _analyze_window(self, window: List[float], window_size: int):
+        """Analyze a window of multipliers for indicators"""
+        # Calculate statistics
+        avg = np.mean(window)
+        std_dev = np.std(window)
+        max_mult = np.max(window)
+        above_2x = sum(1 for m in window if m >= 2.0)
+
+        # Indicator 1: Pre-Streak Pattern (only for 10-round window)
+        if window_size == 10:
+            if avg > 3.75 and above_2x >= 4 and std_dev > 13.6 and max_mult > 7.16:
+                self.log("=" * 60)
+                self.log("POSSIBLE INCOMING HOTSTREAK: Pre Streak Pattern")
+                self.log(
+                    f"   Avg: {avg:.2f}x | StdDev: {std_dev:.2f} | Max: {max_mult:.2f}x | Above 2x: {above_2x}/10"
+                )
+                self.log("=" * 60)
+
+        # Indicator 2: High Standard Deviation
+        if std_dev > 25:
+            self.log("=" * 60)
+            self.log(f"POSSIBLE INCOMING HOTSTREAK: Standard Deviation={std_dev:.2f}")
+            self.log(
+                f"   Avg: {avg:.2f}x | Max: {max_mult:.2f}x | Above 2x: {above_2x}/{window_size}"
+            )
+            self.log("=" * 60)
+
+    def _check_chain_patterns(self):
+        """Check for chain patterns after hotstreak"""
+        if self.hotstreak_tracker.last_hotstreak is None:
+            return
+
+        rounds_after = self.hotstreak_tracker.rounds_after_hotstreak
+
+        # Indicator 3: Possible Chain (first 10 rounds after hotstreak)
+        if rounds_after == 10:
+            first_10 = self.hotstreak_tracker.get_last_n_multipliers(10)
+            if len(first_10) == 10:
+                avg = np.mean(first_10)
+                above_2x = sum(1 for m in first_10 if m >= 2.0)
+
+                if (
+                    avg > 2.0
+                    and above_2x > 4
+                    and not self.hotstreak_tracker.cold_streak_occurred
+                ):
+                    last_streak = self.hotstreak_tracker.last_hotstreak
+
+                    # Check if highly possible chain
+                    if last_streak["type"] == "strong" and last_streak["average"] > 6.0:
+                        self.log("=" * 60)
+                        self.log("POSSIBLE INCOMING HOTSTREAK: Dead Ass Chain")
+                        self.log(
+                            f"   Last streak: {last_streak['type']} (avg: {last_streak['average']:.2f}x)"
+                        )
+                        self.log(
+                            f"   First 10 after: Avg {avg:.2f}x | Above 2x: {above_2x}/10"
+                        )
+                        self.log("=" * 60)
+                    else:
+                        self.log("=" * 60)
+                        self.log("POSSIBLE INCOMING HOTSTREAK: Possible Chain")
+                        self.log(
+                            f"   Last streak: {last_streak['type']} (avg: {last_streak['average']:.2f}x)"
+                        )
+                        self.log(
+                            f"   First 10 after: Avg {avg:.2f}x | Above 2x: {above_2x}/10"
+                        )
+                        self.log("=" * 60)
+
+        # Indicator 4: Rule of 17 (first 15 rounds after hotstreak)
+        if rounds_after == 15:
+            if not self.hotstreak_tracker.cold_streak_occurred:
+                last_streak = self.hotstreak_tracker.last_hotstreak
+                self.log("=" * 60)
+                self.log("POSSIBLE INCOMING HOTSTREAK: Rule of 17")
+                self.log(
+                    f"   Last streak: {last_streak['type']} (avg: {last_streak['average']:.2f}x)"
+                )
+                self.log(f"   15 rounds passed with no cold streak")
+                self.log("=" * 60)
 
     def read_recent_multipliers_from_page(self) -> List[float]:
         """
@@ -593,6 +795,10 @@ class MultiStrategyCrasherBot:
                 self.log(f"✓ Added {len(missing_rounds)} missing rounds")
                 self.log(f"  Time range: {last_db_time} to {current_time}")
 
+                # Initialize hotstreak tracker with missing rounds
+                for mult in missing_rounds:
+                    self.hotstreak_tracker.add_multiplier(mult)
+
                 # Set last seen to the most recent
                 if missing_rounds:
                     self.last_seen_multiplier = missing_rounds[-1]
@@ -629,6 +835,10 @@ class MultiStrategyCrasherBot:
                 )
 
                 self.log(f"✓ Imported {len(recent_page)} rounds")
+
+                # Initialize hotstreak tracker with imported rounds
+                for mult in recent_page:
+                    self.hotstreak_tracker.add_multiplier(mult)
 
                 # Set last seen
                 self.last_seen_multiplier = recent_page[-1]
@@ -1098,7 +1308,7 @@ class MultiStrategyCrasherBot:
             return False
 
     def handle_result(self, strategy: StrategyState, multiplier: float):
-        """Handle bet result for a strategy - FIXED to continue betting after losses"""
+        """Handle bet result for a strategy"""
         if multiplier >= strategy.auto_cashout:
             # WIN - reset and deactivate strategy
             profit = strategy.current_bet * (strategy.auto_cashout - 1)
@@ -1114,7 +1324,7 @@ class MultiStrategyCrasherBot:
 
             # Reset strategy completely
             strategy.reset()
-            self.strategy_active = False  # Allow other strategies to activate
+            self.strategy_active = False
 
         else:
             # LOSS - keep strategy active and prepare next bet
@@ -1134,50 +1344,8 @@ class MultiStrategyCrasherBot:
                 f"[{strategy.name}]    Consecutive losses: {strategy.consecutive_losses} | Next bet: {strategy.current_bet:.0f}"
             )
 
-            # CRITICAL: Keep strategy active after loss
-            # Do NOT reset strategy_active flag
-            # Do NOT reset is_active flag
-            # Strategy will continue betting on next round
-
         # Always set waiting_for_result to False after processing result
         strategy.waiting_for_result = False
-
-    def analyze_and_log_predictions(self, current_multiplier_id: int):
-        """
-        Analyze current game state and log prediction signals
-        Only runs when no betting strategy is active
-        """
-        if self.strategy_active:
-            # Don't analyze when a strategy is actively betting
-            return
-
-        # Update game state tracker
-        recent = self.db.get_recent_multipliers(1)
-        if recent:
-            self.game_state_tracker.add_multiplier(recent[0])
-
-        # Get current game state
-        game_state = self.game_state_tracker.get_game_state()
-        game_state["session_id"] = self.db.current_session_id
-
-        # Analyze with all methods
-        triggered_methods, matching_combos = self.prediction_analyzer.analyze_round(
-            game_state, current_multiplier_id
-        )
-
-        # Log results
-        if triggered_methods or matching_combos:
-            self.log("=" * 60)
-            self.log("🎯 PREDICTION ANALYSIS:")
-
-            output_lines = self.prediction_analyzer.format_analysis_output(
-                triggered_methods, matching_combos
-            )
-
-            for line in output_lines:
-                self.log(f"   {line}")
-
-            self.log("=" * 60)
 
     def check_stop_conditions(self) -> bool:
         """Check if we should stop"""
@@ -1195,10 +1363,10 @@ class MultiStrategyCrasherBot:
         return True
 
     def run(self):
-        """Main bot loop - with prediction analysis integrated"""
+        """Main bot loop - with hotstreak analysis integrated"""
         try:
             self.log("=" * 60)
-            self.log("MULTI-STRATEGY CRASHER BOT - ENHANCED WITH PREDICTIONS")
+            self.log("MULTI-STRATEGY CRASHER BOT - WITH HOTSTREAK INDICATORS")
             self.log("=" * 60)
 
             if not self.init_driver():
@@ -1217,12 +1385,6 @@ class MultiStrategyCrasherBot:
             # Attempt session recovery
             self.recover_or_create_session(start_balance)
 
-            self.prediction_analyzer = PredictionAnalyzer(self.db.conn, self.log)
-            self.log("✓ Prediction analyzer initialized")
-            # NEW: Initialize prediction analyzer
-            self.prediction_analyzer = PredictionAnalyzer(self.db.conn, self.log)
-            self.log("✓ Prediction analyzer initialized with 10 methods")
-
             # Initial setup
             first_strategy = list(self.strategies.values())[0]
             if not self.setup_auto_cashout(first_strategy):
@@ -1237,14 +1399,12 @@ class MultiStrategyCrasherBot:
                 )
                 self.log(f"    Cashout: {strategy.auto_cashout}x")
             self.log("=" * 60)
-            self.log(
-                "BOT RUNNING - Monitoring multipliers and analyzing predictions..."
-            )
+            self.log("BOT RUNNING - Monitoring for hotstreak indicators...")
             self.log("=" * 60)
 
             self.running = True
             active_strategy_name = None
-            last_logged_time = {}  # Track when each multiplier was last logged
+            last_logged_time = {}
 
             while self.running:
                 if not self.check_stop_conditions():
@@ -1299,18 +1459,17 @@ class MultiStrategyCrasherBot:
                     self.log(" | ".join(log_parts))
                     self.db.add_multiplier(new_mult, bettor_count)
 
-                    cursor = self.db.conn.cursor()
-                    cursor.execute("SELECT last_insert_rowid()")
-                    current_mult_id = cursor.fetchone()[0]
+                    # Update hotstreak tracker
+                    self.hotstreak_tracker.add_multiplier(new_mult)
 
-                    # Run prediction analysis (only if no strategy is active)
+                    # Analyze for hotstreak indicators (only when no strategy active)
                     if not self.strategy_active and not active_strategy_name:
                         try:
-                            self.analyze_and_log_predictions(current_mult_id)
+                            self.analyze_hotstreak_indicators()
                         except Exception as e:
-                            self.log(f"Prediction analysis error: {e}")
+                            self.log(f"Hotstreak analysis error: {e}")
 
-                    # CRITICAL: Handle result for active strategy
+                    # Handle result for active strategy
                     if active_strategy_name:
                         active_strategy = self.strategies[active_strategy_name]
                         if active_strategy.waiting_for_result:
