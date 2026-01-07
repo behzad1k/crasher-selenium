@@ -41,5 +41,11 @@
       "max_consecutive_losses": 100,
       "bet_multiplier": 1.1112
     }
-  ]
+  ],
+  "secondary_strategy": {
+    "base_bet": 1000,
+    "auto_cashout": 10,
+    "max_consecutive_losses": 12,
+    "bet_multiplier": 2
+  }
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Crasher Bot - Enhanced with Hotstreak Indicators
+Crasher Bot - Enhanced with Hotstreak Indicators and Secondary Strategy
 Monitors game patterns and detects incoming hotstreaks based on statistical analysis
+Includes a secondary strategy that monitors 21 rounds after each signal
 """
 
 import json
@@ -70,6 +71,52 @@ class StrategyState:
         return self.base_bet * (self.bet_multiplier**self.consecutive_losses)
 
 
+@dataclass
+class SecondaryStrategyState:
+    """Track state for secondary strategy"""
+
+    name: str
+    base_bet: float
+    auto_cashout: float
+    max_consecutive_losses: int
+    bet_multiplier: float
+
+    # Runtime state
+    current_bet: float
+    consecutive_losses: int
+    total_profit: float
+    waiting_for_result: bool
+    is_active: bool
+    monitoring: bool
+    rounds_monitored: int
+    monitoring_history: List[float]
+
+    def reset(self):
+        """Reset strategy state after win"""
+        self.current_bet = self.base_bet
+        self.consecutive_losses = 0
+        self.waiting_for_result = False
+        self.is_active = False
+
+    def stop_monitoring(self):
+        """Stop monitoring and reset monitoring state"""
+        self.monitoring = False
+        self.rounds_monitored = 0
+        self.monitoring_history = []
+
+    def start_monitoring(self):
+        """Start monitoring phase"""
+        self.monitoring = True
+        self.rounds_monitored = 0
+        self.monitoring_history = []
+
+    def calc_next_bet(self) -> float:
+        """Calculate next bet using custom multiplier"""
+        if self.consecutive_losses == 0:
+            return self.base_bet
+        return self.base_bet * (self.bet_multiplier**self.consecutive_losses)
+
+
 class HotstreakTracker:
     """Tracks hotstreaks and analyzes patterns for prediction"""
 
@@ -82,6 +129,7 @@ class HotstreakTracker:
         self.rounds_after_hotstreak = 0
         self.cold_streak_occurred = False
         self.cold_streak_count = 0
+        self.last_signal_round = 0  # Track when last signal occurred
 
     def add_multiplier(self, multiplier: float):
         """Add new multiplier and update tracking"""
@@ -124,6 +172,7 @@ class HotstreakTracker:
                         "start_round": self.current_round - window_size + 1,
                         "multipliers": window.copy(),
                     }
+                    logger.info(f"{streak_type.capitalize()} Hotstreak Detected!")
                 else:
                     # Update existing hotstreak
                     self.current_hotstreak["length"] = window_size
@@ -141,6 +190,7 @@ class HotstreakTracker:
             self.cold_streak_occurred = False
             self.cold_streak_count = 0
             self.current_hotstreak = None
+            logger.info("Hotstreak Just Ended!")
 
     def _track_cold_streak(self, multiplier: float):
         """Track cold streaks (5+ consecutive rounds under 2.0x)"""
@@ -167,6 +217,10 @@ class HotstreakTracker:
     def just_ended_hotstreak(self) -> bool:
         """Check if hotstreak just ended (within last 15 rounds)"""
         return self.last_hotstreak is not None and self.rounds_after_hotstreak <= 15
+
+    def signal_occurred(self):
+        """Mark that a signal occurred (for secondary strategy tracking)"""
+        self.last_signal_round = self.current_round
 
 
 class SessionManager:
@@ -438,7 +492,7 @@ class Database:
 
 
 class MultiStrategyCrasherBot:
-    """Crasher bot with hotstreak detection"""
+    """Crasher bot with hotstreak detection and secondary strategy"""
 
     def __init__(self, config_path: str = "./bot_config.json"):
         with open(config_path, "r") as f:
@@ -452,6 +506,10 @@ class MultiStrategyCrasherBot:
         # Load strategies
         self.strategies: Dict[str, StrategyState] = {}
         self._load_strategies()
+
+        # Load secondary strategy
+        self.secondary_strategy = None
+        self._load_secondary_strategy()
 
         # Bot state
         self.driver = None
@@ -495,6 +553,30 @@ class MultiStrategyCrasherBot:
             self.strategies[name] = strategy
             self.log(f"Loaded strategy: {name}")
 
+    def _load_secondary_strategy(self):
+        """Load secondary strategy from config"""
+        if "secondary_strategy" not in self.config:
+            self.log("No secondary strategy configured")
+            return
+
+        sec_config = self.config["secondary_strategy"]
+        self.secondary_strategy = SecondaryStrategyState(
+            name="Secondary",
+            base_bet=float(sec_config["base_bet"]),
+            auto_cashout=float(sec_config["auto_cashout"]),
+            max_consecutive_losses=int(sec_config.get("max_consecutive_losses", 20)),
+            bet_multiplier=float(sec_config.get("bet_multiplier", 2.0)),
+            current_bet=float(sec_config["base_bet"]),
+            consecutive_losses=0,
+            total_profit=0.0,
+            waiting_for_result=False,
+            is_active=False,
+            monitoring=False,
+            rounds_monitored=0,
+            monitoring_history=[],
+        )
+        self.log(f"Loaded secondary strategy")
+
     def log(self, message: str):
         try:
             logger.info(message)
@@ -519,34 +601,60 @@ class MultiStrategyCrasherBot:
         if len(last_10) < 10:
             return
 
+        # Track if we found any signal
+        signal_found = False
+
         # Analyze last 10 rounds
-        self._analyze_window(last_10, window_size=10)
+        if self._analyze_window(last_10, window_size=10):
+            signal_found = True
 
         # Analyze last 15 rounds if available
         if len(last_15) >= 15:
-            self._analyze_window(last_15, window_size=15)
+            if self._analyze_window(last_15, window_size=15):
+                signal_found = True
 
         # Check for chain patterns after hotstreak
         if self.hotstreak_tracker.just_ended_hotstreak():
-            self._check_chain_patterns()
+            if self._check_chain_patterns():
+                signal_found = True
 
-    def _analyze_window(self, window: List[float], window_size: int):
-        """Analyze a window of multipliers for indicators"""
+        # If signal found and secondary strategy exists, start/restart monitoring
+        if signal_found and self.secondary_strategy:
+            # Only log and reset if we're starting fresh or already monitoring
+            if self.secondary_strategy.monitoring:
+                self.log("=" * 60)
+                self.log(
+                    f"[Secondary] NEW SIGNAL DETECTED at round {self.secondary_strategy.rounds_monitored}/21 - RESTARTING monitoring"
+                )
+                self.log("=" * 60)
+            else:
+                self.log("=" * 60)
+                self.log("[Secondary] SIGNAL DETECTED - Starting 21-round monitoring")
+                self.log("=" * 60)
+
+            self.secondary_strategy.start_monitoring()
+            self.hotstreak_tracker.signal_occurred()
+
+    def _analyze_window(self, window: List[float], window_size: int) -> bool:
+        """Analyze a window of multipliers for indicators. Returns True if signal found."""
         # Calculate statistics
         avg = np.mean(window)
         std_dev = np.std(window)
         max_mult = np.max(window)
         above_2x = sum(1 for m in window if m >= 2.0)
 
+        signal_found = False
+
         # Indicator 1: Pre-Streak Pattern (only for 10-round window)
         if window_size == 10:
-            if avg > 3.75 and above_2x >= 4 and std_dev > 13.6 and max_mult > 7.16:
+            if avg > 3.75 and above_2x >= 4 and std_dev > 12 and max_mult > 7.16:
                 self.log("=" * 60)
                 self.log("POSSIBLE INCOMING HOTSTREAK: Pre Streak Pattern")
                 self.log(
                     f"   Avg: {avg:.2f}x | StdDev: {std_dev:.2f} | Max: {max_mult:.2f}x | Above 2x: {above_2x}/10"
                 )
                 self.log("=" * 60)
+                signal_found = True
 
         # Indicator 2: High Standard Deviation
         if std_dev > 25:
@@ -556,13 +664,17 @@ class MultiStrategyCrasherBot:
                 f"   Avg: {avg:.2f}x | Max: {max_mult:.2f}x | Above 2x: {above_2x}/{window_size}"
             )
             self.log("=" * 60)
+            signal_found = True
 
-    def _check_chain_patterns(self):
-        """Check for chain patterns after hotstreak"""
+        return signal_found
+
+    def _check_chain_patterns(self) -> bool:
+        """Check for chain patterns after hotstreak. Returns True if signal found."""
         if self.hotstreak_tracker.last_hotstreak is None:
-            return
+            return False
 
         rounds_after = self.hotstreak_tracker.rounds_after_hotstreak
+        signal_found = False
 
         # Indicator 3: Possible Chain (first 10 rounds after hotstreak)
         if rounds_after == 10:
@@ -599,6 +711,7 @@ class MultiStrategyCrasherBot:
                             f"   First 10 after: Avg {avg:.2f}x | Above 2x: {above_2x}/10"
                         )
                         self.log("=" * 60)
+                    signal_found = True
 
         # Indicator 4: Rule of 17 (first 15 rounds after hotstreak)
         if rounds_after == 15:
@@ -611,6 +724,148 @@ class MultiStrategyCrasherBot:
                 )
                 self.log(f"   15 rounds passed with no cold streak")
                 self.log("=" * 60)
+                signal_found = True
+
+        return signal_found
+
+    def handle_secondary_strategy(self, multiplier: float):
+        """Handle secondary strategy monitoring and betting logic"""
+        if not self.secondary_strategy:
+            return
+
+        sec = self.secondary_strategy
+
+        # If strategy is waiting for result, handle it
+        if sec.waiting_for_result:
+            if multiplier >= sec.auto_cashout:
+                # WIN
+                profit = sec.current_bet * (sec.auto_cashout - 1)
+                sec.total_profit += profit
+                self.total_profit += profit
+                self.db.add_bet(sec.name, sec.current_bet, "win", multiplier, profit)
+
+                self.log(
+                    f"[{sec.name}] ✓ WIN! {multiplier}x | Profit: +{profit:.0f} | Total: {sec.total_profit:.0f}"
+                )
+
+                # Reset strategy and drop signal completely
+                if (
+                    self.hotstreak_tracker.last_hotstreak is not None
+                    and self.hotstreak_tracker.last_hotstreak["type"] == "week"
+                ):
+                    self.log(f"[{sec.name}] Dropping signal and stopping monitoring ")
+                    sec.reset()
+                    sec.stop_monitoring()
+                    self.strategy_active = False
+
+            else:
+                # LOSS
+                loss = sec.current_bet
+                sec.total_profit -= loss
+                self.total_profit -= loss
+                self.db.add_bet(sec.name, sec.current_bet, "loss", multiplier, -loss)
+                sec.consecutive_losses += 1
+                sec.current_bet = sec.calc_next_bet()
+
+                self.log(
+                    f"[{sec.name}] ✗ LOSS! {multiplier}x | Loss: -{loss:.0f} | Total: {sec.total_profit:.0f}"
+                )
+                self.log(
+                    f"[{sec.name}]    Consecutive losses: {sec.consecutive_losses} | Next bet: {sec.current_bet:.0f}"
+                )
+
+                # Check if we should stop due to max losses
+                if sec.consecutive_losses >= sec.max_consecutive_losses:
+                    self.log(
+                        f"[{sec.name}] Max consecutive losses reached - dropping signal and stopping"
+                    )
+                    sec.reset()
+                    sec.stop_monitoring()
+                    self.strategy_active = False
+                else:
+                    # Place next bet immediately
+                    time.sleep(1)
+                    if self.place_bet_secondary(sec.current_bet):
+                        sec.waiting_for_result = True
+                    else:
+                        self.log(f"[{sec.name}] ERROR: Failed to place next bet")
+                        sec.reset()
+                        sec.stop_monitoring()
+                        self.strategy_active = False
+
+            sec.waiting_for_result = False
+            return
+
+        # If monitoring, track the round
+        if sec.monitoring and not sec.is_active:
+            sec.rounds_monitored += 1
+            sec.monitoring_history.append(multiplier)
+
+            self.log(
+                f"[{sec.name}] Monitoring round {sec.rounds_monitored}/21: {multiplier}x"
+            )
+
+            # Check last 5 rounds
+            if len(sec.monitoring_history) >= 5:
+                last_5 = sec.monitoring_history[-5:]
+
+                # Check if all 5 are under 2.01x - drop the clue
+                all_under = all(m < 2.01 for m in last_5)
+                if all_under:
+                    self.log("=" * 60)
+                    self.log(
+                        f"[{sec.name}] All last 5 rounds under 2.01x - DROPPING CLUE"
+                    )
+                    self.log(f"   Last 5: {last_5}")
+                    self.log("=" * 60)
+                    sec.stop_monitoring()
+                    return
+
+                # Check if 3+ are above 2.0x - activate strategy
+                # BUT only if no other strategy is currently active
+                above_2x = sum(1 for m in last_5 if m >= 2.0)
+                if above_2x >= 3 and not sec.is_active and not self.strategy_active:
+                    self.log("=" * 60)
+                    self.log(
+                        f"[{sec.name}] 3+ of last 5 rounds above 2.0x - ACTIVATING"
+                    )
+                    self.log(f"   Last 5: {last_5}")
+                    self.log("=" * 60)
+
+                    sec.is_active = True
+                    self.strategy_active = True
+
+                    # Setup auto cashout
+                    if not self.setup_auto_cashout_secondary():
+                        self.log(f"[{sec.name}] WARNING: Failed to setup auto-cashout")
+                        sec.reset()
+                        sec.stop_monitoring()
+                        self.strategy_active = False
+                        return
+
+                    time.sleep(2)
+                    bet_amount = sec.calc_next_bet()
+
+                    if self.place_bet_secondary(bet_amount):
+                        sec.current_bet = bet_amount
+                        sec.waiting_for_result = True
+                    else:
+                        self.log(f"[{sec.name}] ERROR: Failed to place bet")
+                        sec.reset()
+                        sec.stop_monitoring()
+                        self.strategy_active = False
+                elif above_2x >= 3 and self.strategy_active:
+                    # Activation conditions met but another strategy is active
+                    self.log(
+                        f"[{sec.name}] Activation conditions met but another strategy is active - waiting..."
+                    )
+
+            # Stop monitoring after 21 rounds
+            if sec.rounds_monitored >= 21:
+                self.log("=" * 60)
+                self.log(f"[{sec.name}] 21 rounds completed - Stopping monitoring")
+                self.log("=" * 60)
+                sec.stop_monitoring()
 
     def read_recent_multipliers_from_page(self) -> List[float]:
         """
@@ -1150,6 +1405,29 @@ class MultiStrategyCrasherBot:
 
         return False
 
+    def setup_auto_cashout_secondary(self, max_retries: int = 3) -> bool:
+        """Setup auto cashout for secondary strategy"""
+        if not self.secondary_strategy:
+            return False
+
+        return self.setup_auto_cashout(
+            StrategyState(
+                name=self.secondary_strategy.name,
+                base_bet=self.secondary_strategy.base_bet,
+                auto_cashout=self.secondary_strategy.auto_cashout,
+                trigger_threshold=0,
+                trigger_count=0,
+                max_consecutive_losses=self.secondary_strategy.max_consecutive_losses,
+                bet_multiplier=self.secondary_strategy.bet_multiplier,
+                current_bet=self.secondary_strategy.current_bet,
+                consecutive_losses=self.secondary_strategy.consecutive_losses,
+                total_profit=self.secondary_strategy.total_profit,
+                waiting_for_result=self.secondary_strategy.waiting_for_result,
+                is_active=self.secondary_strategy.is_active,
+            ),
+            max_retries,
+        )
+
     def get_bettor_count(self) -> Optional[int]:
         """Get number of bettors"""
         try:
@@ -1311,6 +1589,46 @@ class MultiStrategyCrasherBot:
             self.log(f"[{strategy.name}] Failed to place bet: {e}")
             return False
 
+    def place_bet_secondary(self, amount: float) -> bool:
+        """Place a bet for secondary strategy"""
+        if not self.secondary_strategy:
+            return False
+
+        try:
+            from selenium.webdriver.common.keys import Keys
+
+            panels = self.driver.find_elements(
+                By.CSS_SELECTOR, "div[data-singlebetpart]"
+            )
+            if not panels:
+                return False
+
+            bet_input = panels[0].find_element(
+                By.CSS_SELECTOR, 'input[data-testid="bp-inp"]'
+            )
+            bet_input.click()
+            time.sleep(0.1)
+
+            for _ in range(8):
+                bet_input.send_keys(Keys.BACKSPACE)
+            time.sleep(0.1)
+
+            bet_input.send_keys(str(int(amount)))
+            time.sleep(0.1)
+
+            bet_button = panels[0].find_element(
+                By.CSS_SELECTOR, 'button[data-testid="b-btn"]'
+            )
+            bet_button.click()
+            time.sleep(0.1)
+
+            self.log(f"[{self.secondary_strategy.name}] BET PLACED: {amount}")
+            return True
+
+        except Exception as e:
+            self.log(f"[{self.secondary_strategy.name}] Failed to place bet: {e}")
+            return False
+
     def handle_result(self, strategy: StrategyState, multiplier: float):
         """Handle bet result for a strategy"""
         if multiplier >= strategy.auto_cashout:
@@ -1364,13 +1682,24 @@ class MultiStrategyCrasherBot:
                 )
                 return False
 
+        # Check secondary strategy
+        if (
+            self.secondary_strategy
+            and self.secondary_strategy.consecutive_losses
+            >= self.secondary_strategy.max_consecutive_losses
+        ):
+            self.log(
+                f"STOP: [{self.secondary_strategy.name}] Max consecutive losses reached ({self.secondary_strategy.consecutive_losses})"
+            )
+            return False
+
         return True
 
     def run(self):
-        """Main bot loop - with hotstreak analysis integrated"""
+        """Main bot loop - with hotstreak analysis and secondary strategy integrated"""
         try:
             self.log("=" * 60)
-            self.log("MULTI-STRATEGY CRASHER BOT - WITH HOTSTREAK INDICATORS")
+            self.log("MULTI-STRATEGY CRASHER BOT - WITH SECONDARY STRATEGY")
             self.log("=" * 60)
 
             if not self.init_driver():
@@ -1402,8 +1731,14 @@ class MultiStrategyCrasherBot:
                     f"    Trigger: {strategy.trigger_count} rounds under {strategy.trigger_threshold}x"
                 )
                 self.log(f"    Cashout: {strategy.auto_cashout}x")
+
+            if self.secondary_strategy:
+                self.log(f"  [{self.secondary_strategy.name}]")
+                self.log(f"    Trigger: Signal-based (21-round monitoring)")
+                self.log(f"    Cashout: {self.secondary_strategy.auto_cashout}x")
+
             self.log("=" * 60)
-            self.log("BOT RUNNING - Monitoring for hotstreak indicators...")
+            self.log("BOT RUNNING - Monitoring for signals...")
             self.log("=" * 60)
 
             self.running = True
@@ -1449,7 +1784,6 @@ class MultiStrategyCrasherBot:
                     if self.rounds_since_setup >= 20:
                         self.log("Keeping session active...")
                         self.click_on_multiplier()
-                        # self.setup_auto_cashout(first_strategy)
                         self.rounds_since_setup = 0
 
                     bettor_count = self.get_bettor_count()
@@ -1467,6 +1801,10 @@ class MultiStrategyCrasherBot:
                     # Update hotstreak tracker
                     self.hotstreak_tracker.add_multiplier(new_mult)
 
+                    # Handle secondary strategy monitoring/betting
+                    if self.secondary_strategy:
+                        self.handle_secondary_strategy(new_mult)
+
                     # Analyze for hotstreak indicators (only when no strategy active)
                     if not self.strategy_active and not active_strategy_name:
                         try:
@@ -1474,7 +1812,7 @@ class MultiStrategyCrasherBot:
                         except Exception as e:
                             self.log(f"Hotstreak analysis error: {e}")
 
-                    # Handle result for active strategy
+                    # Handle result for active primary strategy
                     if active_strategy_name:
                         active_strategy = self.strategies[active_strategy_name]
                         if active_strategy.waiting_for_result:
@@ -1506,8 +1844,16 @@ class MultiStrategyCrasherBot:
                                     active_strategy_name = None
                                     self.strategy_active = False
 
-                    # Only check for NEW strategy activation if no strategy is currently active
-                    if not active_strategy_name and not self.strategy_active:
+                    # Only check for NEW primary strategy activation if no strategy is currently active
+                    # AND secondary strategy is not active
+                    if (
+                        not active_strategy_name
+                        and not self.strategy_active
+                        and (
+                            not self.secondary_strategy
+                            or not self.secondary_strategy.is_active
+                        )
+                    ):
                         for name, strategy in self.strategies.items():
                             if not strategy.is_active and self.check_trigger(strategy):
                                 self.log(f"[{name}] Strategy ACTIVATED")
@@ -1562,6 +1908,15 @@ class MultiStrategyCrasherBot:
                 self.log(f"   [{name}]:")
                 self.log(f"     Profit/Loss: {strategy.total_profit:.0f}")
                 self.log(f"     Consecutive Losses: {strategy.consecutive_losses}")
+
+            if self.secondary_strategy:
+                self.log(f"   [{self.secondary_strategy.name}]:")
+                self.log(
+                    f"     Profit/Loss: {self.secondary_strategy.total_profit:.0f}"
+                )
+                self.log(
+                    f"     Consecutive Losses: {self.secondary_strategy.consecutive_losses}"
+                )
 
             try:
                 final_balance = self.get_bank_balance()
