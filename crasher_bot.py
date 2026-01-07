@@ -172,7 +172,7 @@ class HotstreakTracker:
                         "start_round": self.current_round - window_size + 1,
                         "multipliers": window.copy(),
                     }
-                    logger.info(f"{streak_type.capitalize()} Hotstreak Detected!")
+                    logger.info(f"{streak_type.capitalize()} New Hotstreak Detected!")
                 else:
                     # Update existing hotstreak
                     self.current_hotstreak["length"] = window_size
@@ -190,7 +190,6 @@ class HotstreakTracker:
             self.cold_streak_occurred = False
             self.cold_streak_count = 0
             self.current_hotstreak = None
-            logger.info("Hotstreak Just Ended!")
 
     def _track_cold_streak(self, multiplier: float):
         """Track cold streaks (5+ consecutive rounds under 2.0x)"""
@@ -747,16 +746,13 @@ class MultiStrategyCrasherBot:
                 self.log(
                     f"[{sec.name}] ✓ WIN! {multiplier}x | Profit: +{profit:.0f} | Total: {sec.total_profit:.0f}"
                 )
+                self.log(f"[{sec.name}] Dropping signal and stopping monitoring")
 
                 # Reset strategy and drop signal completely
-                if (
-                    self.hotstreak_tracker.last_hotstreak is not None
-                    and self.hotstreak_tracker.last_hotstreak["type"] == "week"
-                ):
-                    self.log(f"[{sec.name}] Dropping signal and stopping monitoring ")
-                    sec.reset()
-                    sec.stop_monitoring()
-                    self.strategy_active = False
+                sec.reset()
+                sec.stop_monitoring()
+                self.strategy_active = False
+                sec.waiting_for_result = False
 
             else:
                 # LOSS
@@ -782,18 +778,20 @@ class MultiStrategyCrasherBot:
                     sec.reset()
                     sec.stop_monitoring()
                     self.strategy_active = False
+                    sec.waiting_for_result = False
                 else:
                     # Place next bet immediately
                     time.sleep(1)
                     if self.place_bet_secondary(sec.current_bet):
                         sec.waiting_for_result = True
+                        # DO NOT set waiting_for_result to False here - we need to wait for next result!
                     else:
                         self.log(f"[{sec.name}] ERROR: Failed to place next bet")
                         sec.reset()
                         sec.stop_monitoring()
                         self.strategy_active = False
+                        sec.waiting_for_result = False
 
-            sec.waiting_for_result = False
             return
 
         # If monitoring, track the round
