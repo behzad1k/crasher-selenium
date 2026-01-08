@@ -104,11 +104,14 @@ class SecondaryStrategyState:
         self.rounds_monitored = 0
         self.monitoring_history = []
 
-    def start_monitoring(self):
+    def start_monitoring(self, initial_history: List[float] = None):
         """Start monitoring phase"""
         self.monitoring = True
         self.rounds_monitored = 0
-        self.monitoring_history = []
+        if initial_history:
+            self.monitoring_history = initial_history.copy()
+        else:
+            self.monitoring_history = []
 
     def calc_next_bet(self) -> float:
         """Calculate next bet using custom multiplier"""
@@ -619,6 +622,9 @@ class MultiStrategyCrasherBot:
 
         # If signal found and secondary strategy exists, start/restart monitoring
         if signal_found and self.secondary_strategy:
+            # Get last 5 multipliers to initialize monitoring history
+            last_5_rounds = self.hotstreak_tracker.get_last_n_multipliers(5)
+
             # Only log and reset if we're starting fresh or already monitoring
             if self.secondary_strategy.monitoring:
                 self.log("=" * 60)
@@ -629,9 +635,13 @@ class MultiStrategyCrasherBot:
             else:
                 self.log("=" * 60)
                 self.log("[Secondary] SIGNAL DETECTED - Starting 21-round monitoring")
+                if last_5_rounds:
+                    self.log(
+                        f"[Secondary] Initializing with last 5 rounds: {last_5_rounds}"
+                    )
                 self.log("=" * 60)
 
-            self.secondary_strategy.start_monitoring()
+            self.secondary_strategy.start_monitoring(last_5_rounds)
             self.hotstreak_tracker.signal_occurred()
 
     def _analyze_window(self, window: List[float], window_size: int) -> bool:
@@ -736,6 +746,10 @@ class MultiStrategyCrasherBot:
 
         # If strategy is waiting for result, handle it
         if sec.waiting_for_result:
+            # First, add this round to monitoring history for cold streak detection
+            if sec.monitoring:
+                sec.monitoring_history.append(multiplier)
+
             if multiplier >= sec.auto_cashout:
                 # WIN
                 profit = sec.current_bet * (sec.auto_cashout - 1)
@@ -769,6 +783,23 @@ class MultiStrategyCrasherBot:
                 self.log(
                     f"[{sec.name}]    Consecutive losses: {sec.consecutive_losses} | Next bet: {sec.current_bet:.0f}"
                 )
+
+                # Check for cold streak (all last 5 rounds under 2.01x) WHILE BETTING
+                if sec.monitoring and len(sec.monitoring_history) >= 5:
+                    last_5 = sec.monitoring_history[-5:]
+                    all_under = all(m < 2.01 for m in last_5)
+
+                    if all_under:
+                        self.log("=" * 60)
+                        self.log(f"[{sec.name}] COLD STREAK DETECTED while betting!")
+                        self.log(f"   Last 5 rounds all under 2.01x: {last_5}")
+                        self.log(f"[{sec.name}] Dropping signal and stopping")
+                        self.log("=" * 60)
+                        sec.reset()
+                        sec.stop_monitoring()
+                        self.strategy_active = False
+                        sec.waiting_for_result = False
+                        return
 
                 # Check if we should stop due to max losses
                 if sec.consecutive_losses >= sec.max_consecutive_losses:
